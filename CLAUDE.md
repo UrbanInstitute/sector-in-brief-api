@@ -38,15 +38,26 @@ Request shape:
 - `.github/workflows/sam_pipeline.yaml` — CI/CD (stg/prod).
 - `tests/test_query.py`, `events/event.json` — tests + sample event.
 
-## Planned next phase: API overhaul (not yet started)
+## API overhaul (planned; not yet built)
 
-Scope still to be defined with the user. Candidate work:
-- **Rename internals** still saying "nccs": bucket `nccsdata`, table `nccs_core` /
-  `CORE_FULL_V0_1`, `nccsLambda` / `nccsAPI` in `template.yaml`, README, `samconfig.toml`.
-- **Restructure** `src/` scratch scripts vs. the real `query/query.py`; fix the broken `src/` bits.
-- Possible behavioral/API changes, plus tests/CI/dependency cleanup.
+This repo is the modernized API. The architecture is **decided and canonical in
+`nccs-contracts`** — do not re-derive it here:
 
-Ask the user for the overhaul scope before making changes.
+- **`nccs-contracts` ADR 0020** — *Realize the Modernized API as sector-in-brief-api*
+  (finalizes names, host, buckets). Implements **ADR 0008** (modernize the API),
+  per **ADR 0003** (DuckDB, not Athena) and **ADR 0016** (join the separate
+  contracts at query time; no pre-merged table).
+
+In short: replace the Athena handler with **DuckDB on parquet**, reading the
+contracted CORE tiers + BMF-geocoded from `s3://nccsdata/...` **read-only** and
+joining on `EIN` at query time; write results to a new
+`sector-in-brief-api-results-{stg|prod}` bucket (30-day lifecycle); keep the
+`sector-in-brief` dashboard's Data-Download payload backward-compatible.
+Delete the old Athena setup and `src/` scratch. Runtime host (AWS App Runner vs
+Lambda) is provisional pending a Phase-0 measurement of real result sizes.
+
+When executing, leave `ADR 0020 step N` breadcrumbs in commit messages and
+reconcile back into `nccs-contracts` (see its `CONTRIBUTING.md`).
 
 ## Conventions
 
