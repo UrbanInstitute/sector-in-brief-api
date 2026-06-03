@@ -1,0 +1,14 @@
+{
+    "requestContext" : {
+        "stage": "stg"
+    },
+    "queryParameters": {
+        "varParameters": {
+            "var": ["EIN2"]
+        },
+        "filterParameters": {
+            "CENSUS_STATE_ABBR" : ["CA"]
+        },
+        "stage": "stg"
+    }
+}

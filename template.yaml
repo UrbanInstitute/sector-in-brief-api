@@ -1,0 +1,126 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: An AWS Serverless Specification template describing your function.
+
+Parameters:
+  S3BucketName:
+    Type: String
+    Description: The name of the S3 bucket
+    Default: nccs-dataexplorer
+  Stage:
+    Type: String
+    Description: The name for a project pipeline stage, such as Staging or Prod, for
+      which resources are provisioned and deployed.
+    Default: stg
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Runtime: python3.10
+    Timeout: 180
+    MemorySize: 512
+    LoggingConfig:
+      LogFormat: JSON
+
+Resources:
+
+  nccsAPI:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Sub ${Stage}
+      DefinitionBody:
+        swagger: '2.0'
+        info:
+          title: !Sub nccs-api-query-${Stage}
+        paths:
+          /data:
+            post:
+              consumes:
+                - application/json
+              produces:
+                - application/json
+              x-amazon-apigateway-integration:
+                uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${nccsLambda.Arn}/invocations
+                passthroughBehavior: when_no_match
+                httpMethod: POST
+                type: aws_proxy
+
+  nccsLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub nccs-api-query-${Stage}
+      CodeUri: ./query/
+      Handler: query.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        GetEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref nccsAPI
+            Path: /data
+            Method: POST
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: nccs-athena-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - athena:* # Add or remove permissions as necessary
+                  - glue:*
+                  - s3:*
+                  - ses:*
+                Resource: '*'
+        - PolicyName: AllowSecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: arn:aws:secretsmanager:us-east-1:672001523455:secret:data-manager-api-engine-secret-bRzaMh
+
+  GithubActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: nccs-data-explorer-github-actions-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:*
+                  - iam:*
+                  - lambda:*
+                  - s3:*
+                  - ssm:*
+                  - apigateway:*
+                Resource: '*'
+
+Outputs:
+  MyApi:
+    Description: URL for newly created API
+    Value: !Sub https://${nccsAPI}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/

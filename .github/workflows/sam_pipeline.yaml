@@ -1,0 +1,54 @@
+on:
+  push:
+    branches:
+      - staging 
+      - production 
+
+env: 
+  STACK_NAME: nccs-data-explorer 
+  IAM_ROLE: arn:aws:iam::672001523455:role/nccs-data-explorer-GithubActionsRole-CMrn8A6RysfF
+  AWS_REGION: us-east-1
+  BRANCH_NAME: ${{ github.ref_name }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Specify staging stack and stage names 
+      - name: Configure staging application
+        if: ${{ env.BRANCH_NAME == 'staging' }}
+        run: |
+          echo "STAGE=stg" >> $GITHUB_ENV
+          echo "STACK_NAME=${STACK_NAME}-stg" >> $GITHUB_ENV
+      # Specify production stack and stage names 
+      - name: Configure production application
+        if: ${{ env.BRANCH_NAME == 'production' }}
+        run: |
+          echo "STAGE=prod" >> $GITHUB_ENV
+          echo "STACK_NAME=${STACK_NAME}-prod" >> $GITHUB_ENV
+      # Configure Python 
+      - uses: actions/setup-python@v4
+        with: 
+          python-version: '3.10'
+      # Configure AWS CLI and SAM credentials 
+      - uses: aws-actions/setup-sam@v2
+      - name: Configure AWS credentials 
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.IAM_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      # Build application 
+      - name: Build SAM application  
+        run: |
+          sam build 
+      # Deploy application based on staging/production  
+      - name: Deploy SAM application
+        run: |
+          sam deploy \
+            --stack-name ${STACK_NAME} \
+            --parameter-overrides Stage=${STAGE} 
