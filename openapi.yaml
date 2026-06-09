@@ -84,11 +84,22 @@ components:
           items: { type: integer, minimum: 1989 }
           description: Core 990 tax-year partitions to read (selects which parquet files).
           example: [2019, 2020]
-        form:
-          type: string
-          default: "990"
-          enum: ["990"]
-          description: Core form tier. Slice 1 supports 990; other tiers (990ez/990pf/combined/legacy) are a later extension.
+        forms:
+          type: array
+          minItems: 1
+          default: [990, 990ez, 990pf, 990combined]
+          items:
+            type: string
+            enum: [990, 990ez, 990pf, 990combined]
+          description: >
+            Core form types to include, read from
+            processed/core/{tax_year}/{form}/. Filings across the selected forms
+            are unioned (union_by_name — 990-PF columns don't align with 990/EZ,
+            so columns absent from a form are null for those rows). NB: 990combined
+            already unions 990 + 990-EZ, so selecting it alongside 990/990ez can
+            double-count rows — the form set is the caller's choice; the API does
+            not dedup across forms.
+          example: [990, 990ez, 990pf, 990combined]
         columns:
           type: array
           minItems: 1

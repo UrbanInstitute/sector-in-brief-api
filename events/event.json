@@ -1,14 +1,7 @@
 {
-    "requestContext" : {
-        "stage": "stg"
-    },
-    "queryParameters": {
-        "varParameters": {
-            "var": ["EIN2"]
-        },
-        "filterParameters": {
-            "CENSUS_STATE_ABBR" : ["CA"]
-        },
-        "stage": "stg"
-    }
+  "tax_years": [2019],
+  "forms": ["990", "990ez"],
+  "columns": ["ein", "org_name_display", "geo_state_abbr", "ntee_common_code", "total_revenue", "total_assets_eoy"],
+  "filters": { "geo_state_abbr": ["CA"] },
+  "format": "csv"
 }
