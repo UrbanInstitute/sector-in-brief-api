@@ -38,9 +38,28 @@ TIERS = {
 ORDER = ["small", "medium", "large"]
 
 
+def detect_region():
+    """region for the in-region check; bare SSM shells have no configured region."""
+    r = boto3.Session().region_name
+    if r:
+        return r
+    try:  # IMDSv2 -> availability zone -> region
+        import urllib.request as u
+        tok = u.urlopen(u.Request("http://169.254.169.254/latest/api/token", method="PUT",
+              headers={"X-aws-ec2-metadata-token-ttl-seconds": "60"}), timeout=1).read().decode()
+        az = u.urlopen(u.Request("http://169.254.169.254/latest/meta-data/placement/availability-zone",
+              headers={"X-aws-ec2-metadata-token": tok}), timeout=1).read().decode()
+        return az[:-1]
+    except Exception:
+        return "unknown"
+
+
 def connect(mem_limit):
     cr = boto3.Session().get_credentials().get_frozen_credentials()
     con = duckdb.connect()
+    # SSM root shells have an empty $HOME, so DuckDB can't find a place to cache
+    # the httpfs extension; pin it explicitly.
+    con.execute("SET home_directory='/tmp';")
     con.execute("INSTALL httpfs; LOAD httpfs;")
     con.execute("CREATE SECRET s (TYPE s3, KEY_ID ?, SECRET ?, SESSION_TOKEN ?, REGION 'us-east-1');",
                 [cr.access_key, cr.secret_key, cr.token])
@@ -70,7 +89,7 @@ def main():
     max_tier = sys.argv[1] if len(sys.argv) > 1 else "medium"
     mem = sys.argv[2] if len(sys.argv) > 2 else "1.5GB"
     sts = boto3.client("sts"); ident = sts.get_caller_identity()
-    region = boto3.Session().region_name or "unknown"
+    region = detect_region()
     print(f"identity: {ident['Arn']}")
     print(f"region:   {region}   (MUST be us-east-1 for an in-region number)")
     print(f"duckdb {duckdb.__version__}  mem_limit={mem}  max_tier={max_tier}\n")
