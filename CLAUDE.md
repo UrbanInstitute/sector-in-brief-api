@@ -43,21 +43,34 @@ Request shape:
 This repo is the modernized API. The architecture is **decided and canonical in
 `nccs-contracts`** — do not re-derive it here:
 
-- **`nccs-contracts` ADR 0020** — *Realize the Modernized API as sector-in-brief-api*
-  (finalizes names, host, buckets). Implements **ADR 0008** (modernize the API),
-  per **ADR 0003** (DuckDB, not Athena) and **ADR 0016** (join the separate
-  contracts at query time; no pre-merged table).
+- **ADR 0008** — *Modernize the Dataexplorer API*: the canonical API design
+  (DuckDB runtime, result delivery, results bucket + 30-day lifecycle, usage
+  telemetry, repo/naming). Its "Repo and naming" section (finalized 2026-06-04)
+  is what realizes this as **`sector-in-brief-api`**.
+- **ADR 0026** — *Data-Download UX: Durable Links, Email Receipt, Download
+  Telemetry*: refines 0008's download path — always materialize→S3→presigned
+  URL ("pattern B"), a durable `/download/{job_id}` endpoint backed by an S3
+  request registry, default-on email receipt, and a distinct `download`
+  telemetry event.
+- Both rest on **ADR 0003** (DuckDB, not Athena) and **ADR 0016** (join the
+  separate contracts at query time; no pre-merged table).
 
 In short: replace the Athena handler with **DuckDB on parquet**, reading the
 contracted CORE tiers + BMF-geocoded from `s3://nccsdata/...` **read-only** and
 joining on `EIN` at query time; write results to a new
-`sector-in-brief-api-results-{stg|prod}` bucket (30-day lifecycle); keep the
-`sector-in-brief` dashboard's Data-Download payload backward-compatible.
-Delete the old Athena setup and `src/` scratch. Runtime host (AWS App Runner vs
-Lambda) is provisional pending a Phase-0 measurement of real result sizes.
+`sector-in-brief-api-results-{stg|prod}` bucket (30-day lifecycle). Deliver via
+**pattern B** — materialize the result to S3 and hand back a presigned URL — and
+email the requester a **durable `/download/{job_id}` link by default** (re-runs
+the query if the result object has been swept), backed by an S3 request registry
+(`requests/{job_id}.json`; no runtime database). Log every request / materialize
+/ download as NDJSON for the monthly rollup into the contracted `usage-api`
+artifact. Keep the `sector-in-brief` dashboard's Data-Download payload
+backward-compatible. Delete the old Athena setup and `src/` scratch. Runtime host
+(AWS App Runner vs Lambda) is provisional pending a Phase-0 measurement of real
+result sizes.
 
-When executing, leave `ADR 0020 step N` breadcrumbs in commit messages and
-reconcile back into `nccs-contracts` (see its `CONTRIBUTING.md`).
+When executing, reference **ADR 0008 / 0026** in commit messages and reconcile
+back into `nccs-contracts` (see its `CONTRIBUTING.md`).
 
 ## Conventions
 
