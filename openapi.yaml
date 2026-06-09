@@ -57,11 +57,15 @@ paths:
   /download/{job_id}:
     get:
       operationId: getDownload
-      summary: (Slice 2 — placeholder) Durable link; re-issues a presigned URL or re-materializes.
+      summary: Durable download link — re-issues a presigned URL, re-materializing if expired.
       description: >
-        Stub for ADR 0026 §2. Not implemented in slice 1. Will resolve a stored
-        request (registry sidecar) to a fresh presigned URL, re-running the query
-        if the result object has been swept by the 30-day lifecycle.
+        ADR 0026 §2. Resolves the request registry (requests/{job_id}.json); if
+        the result object still exists, 302-redirects to a freshly-issued
+        presigned URL; if the 30-day lifecycle has swept it, re-runs the query
+        from the stored params and redirects to the fresh result. This is the
+        link emailed to the requester (slice 3) — durable for as long as the
+        underlying data vintage exists, while storage stays bounded by the
+        lifecycle rule.
       parameters:
         - name: job_id
           in: path
@@ -125,10 +129,14 @@ components:
           description: Requester email (receipt is default-on from slice 3; ignored in slice 1).
     ExportResponse:
       type: object
-      required: [job_id, row_count, result, data_dictionary]
+      required: [job_id, row_count, result, data_dictionary, download_path]
       properties:
         job_id: { type: string, format: uuid }
         row_count: { type: integer }
+        download_path:
+          type: string
+          description: Durable endpoint for this export, e.g. /download/{job_id} (the emailed link).
+          example: /download/f169b367-eee8-4c74-bb44-bb4ca4e8d558
         result:
           type: object
           properties:
