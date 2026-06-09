@@ -13,6 +13,9 @@ Parameters:
     Default: stg
     AllowedValues: [stg, prod]
 
+Conditions:
+  IsProd: !Equals [!Ref Stage, prod]
+
 Globals:
   Function:
     Runtime: python3.12
@@ -133,8 +136,10 @@ Resources:
       Environment:
         Variables:
           RESULTS_BUCKET: !Ref ResultsBucket
-          USAGE_BUCKET: nccsdata
-          USAGE_PREFIX: usage/api
+          # Only prod publishes the contracted artifact to the nccsdata lake;
+          # staging writes to its own results bucket so it can't clobber prod.
+          USAGE_BUCKET: !If [IsProd, nccsdata, !Ref ResultsBucket]
+          USAGE_PREFIX: !If [IsProd, usage/api, usage/api-stg]
       Events:
         Monthly:
           Type: Schedule
@@ -149,10 +154,12 @@ Resources:
               Resource:
                 - !Sub arn:aws:s3:::sector-in-brief-api-results-${Stage}
                 - !Sub arn:aws:s3:::sector-in-brief-api-results-${Stage}/*
-            - Sid: WriteUsageArtifact     # the only write into the nccsdata lake
+            - Sid: WriteUsageArtifact     # prod -> nccsdata/usage (contracted); stg -> results bucket
               Effect: Allow
               Action: [s3:PutObject]
-              Resource: arn:aws:s3:::nccsdata/usage/*
+              Resource:
+                - arn:aws:s3:::nccsdata/usage/*
+                - !Sub arn:aws:s3:::sector-in-brief-api-results-${Stage}/usage/*
 
 Outputs:
   QueryFunctionUrl:
