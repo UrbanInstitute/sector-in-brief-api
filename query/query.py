@@ -17,7 +17,7 @@ Security: column names are whitelisted against the live schema before they touch
 SQL (filter values are bound params); job_id is shape-checked before it touches an
 S3 key. Interface: ../openapi.yaml.
 """
-import os, re, json, base64, uuid, boto3, duckdb
+import os, re, json, time, base64, uuid, hashlib, boto3, duckdb
 from datetime import datetime, timezone
 
 NCCS = "s3://nccsdata"
@@ -180,6 +180,23 @@ def _resp(status, body):
             "body": json.dumps(body)}
 
 
+# ---- telemetry (ADR 0026 §4 / ADR 0008): per-query NDJSON to logs/queries/ ----
+def _hash_requester(email):
+    return hashlib.sha256(email.encode()).hexdigest()[:16] if email else None
+
+
+def _log_event(s3, etype, payload):
+    """Best-effort: one NDJSON object per event under a per-day prefix. The
+    monthly rollup (slice 4b) aggregates these into the usage-api contract."""
+    try:
+        ts = datetime.now(timezone.utc)
+        key = f"logs/queries/{ts:%Y-%m-%d}/{ts:%H%M%S}-{uuid.uuid4().hex[:8]}.ndjson"
+        rec = {"event": etype, "ts": ts.isoformat(), **payload}
+        s3.put_object(Bucket=RESULTS_BUCKET, Key=key, Body=(json.dumps(rec) + "\n").encode())
+    except Exception:  # noqa: BLE001 — telemetry must never fail the request
+        pass
+
+
 def _exists(s3, key):
     try:
         s3.head_object(Bucket=RESULTS_BUCKET, Key=key)
@@ -274,8 +291,21 @@ def _create_export(event, s3):
     if req.get("estimate"):                  # size pre-check only — return early
         return _estimate(con, plan)
     job_id = str(uuid.uuid4())
-    m = _materialize(con, plan, job_id, s3)
     email = req.get("email")
+    _log_event(s3, "request_created", {
+        "job_id": job_id, "requester": _hash_requester(email),
+        "tax_years": plan["years"], "forms": plan["forms"],
+        "n_columns": len(plan["cols"]), "n_filters": len(plan["filters"]), "format": plan["fmt"]})
+    t0 = time.monotonic()
+    try:
+        m = _materialize(con, plan, job_id, s3)
+    except Exception:
+        _log_event(s3, "export_materialized",
+                   {"job_id": job_id, "success": False, "duration_ms": int((time.monotonic() - t0) * 1000)})
+        raise
+    _log_event(s3, "export_materialized",
+               {"job_id": job_id, "success": True, "row_count": m["row_count"],
+                "bytes": m["bytes"], "duration_ms": int((time.monotonic() - t0) * 1000)})
     registry = {
         "job_id": job_id,
         "request": {"tax_years": plan["years"], "forms": plan["forms"],
@@ -315,10 +345,12 @@ def _download(job_id, s3, kind="result"):
         return _resp(404, {"error": "unknown_job"})
     target_key = (f"results/{job_id}_dictionary.csv" if kind == "dictionary"
                   else registry["result_key"])
-    if not _exists(s3, target_key):                  # swept by the 30-day lifecycle -> re-run
+    rematerialized = not _exists(s3, target_key)
+    if rematerialized:                               # swept by the 30-day lifecycle -> re-run
         con = _con()                                  # re-materialize regenerates BOTH result + dict
         plan = _plan(con, registry["request"])
         _materialize(con, plan, job_id, s3)
+    _log_event(s3, "download", {"job_id": job_id, "kind": kind, "rematerialized": rematerialized})
     return {"statusCode": 302, "headers": {"Location": _presign(s3, target_key)}}
 
 
