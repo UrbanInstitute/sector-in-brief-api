@@ -117,6 +117,43 @@ Resources:
               Action: [s3:PutObject, s3:GetObject]
               Resource: !Sub arn:aws:s3:::sector-in-brief-api-results-${Stage}/*
 
+  # Monthly usage rollup (ADR 0008 / usage-api.yml): aggregates the prior month's
+  # logs/queries/ NDJSON into s3://nccsdata/usage/api/{YYYY_MM}/queries.parquet + manifest.
+  RollupFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub sector-in-brief-api-rollup-${Stage}
+      CodeUri: ./jobs/
+      Handler: rollup.lambda_handler
+      Architectures: [x86_64]
+      MemorySize: 2048
+      Timeout: 600
+      EphemeralStorage:
+        Size: 2048
+      Environment:
+        Variables:
+          RESULTS_BUCKET: !Ref ResultsBucket
+          USAGE_BUCKET: nccsdata
+          USAGE_PREFIX: usage/api
+      Events:
+        Monthly:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 8 1 * ? *)    # 08:00 UTC on the 1st of each month
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            - Sid: ReadLogs
+              Effect: Allow
+              Action: [s3:GetObject, s3:ListBucket]
+              Resource:
+                - !Sub arn:aws:s3:::sector-in-brief-api-results-${Stage}
+                - !Sub arn:aws:s3:::sector-in-brief-api-results-${Stage}/*
+            - Sid: WriteUsageArtifact     # the only write into the nccsdata lake
+              Effect: Allow
+              Action: [s3:PutObject]
+              Resource: arn:aws:s3:::nccsdata/usage/*
+
 Outputs:
   QueryFunctionUrl:
     Description: POST /data endpoint (Function URL, AWS_IAM)
