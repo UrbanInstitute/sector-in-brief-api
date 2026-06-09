@@ -1,0 +1,159 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Bootstrap: GitHub Actions OIDC deploy role for sector-in-brief-api. Deploy this
+  ONCE (by an admin), then put the output RoleArn into the repo's
+  `AWS_DEPLOY_ROLE_ARN` GitHub secret. The GitHub OIDC provider already exists in
+  this account, so this only creates the role. Separate from the app stack so the
+  app stack never manages its own deploy credentials.
+
+  Deploy:
+    aws cloudformation deploy --template-file iac/github-oidc-role.yaml \
+      --stack-name sector-in-brief-api-cicd --capabilities CAPABILITY_NAMED_IAM \
+      --profile thiya --region us-east-1
+    aws cloudformation describe-stacks --stack-name sector-in-brief-api-cicd \
+      --query "Stacks[0].Outputs" --profile thiya --region us-east-1
+
+Parameters:
+  GitHubRepo:
+    Type: String
+    Default: UrbanInstitute/sector-in-brief-api
+    Description: owner/repo as it appears in the GitHub OIDC `sub` claim.
+  OidcProviderArn:
+    Type: String
+    Default: ""
+    Description: >
+      Existing GitHub OIDC provider ARN. Leave blank to use the conventional ARN
+      for this account (token.actions.githubusercontent.com).
+
+Conditions:
+  UseDefaultProvider: !Equals [!Ref OidcProviderArn, ""]
+
+Resources:
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: sector-in-brief-api-github-deploy
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - UseDefaultProvider
+                - !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+                - !Ref OidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                # The deploy job runs under a GitHub Environment, so the sub is
+                # repo:<owner>/<repo>:environment:staging|production. PRs/other
+                # refs never get this role.
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepo}:environment:*
+      Policies:
+        - PolicyName: deploy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudFormation
+                Effect: Allow
+                Action: [cloudformation:*]
+                Resource:
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/sector-in-brief-api-*/*
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/aws-sam-cli-managed-default/*
+              - Sid: CloudFormationGlobal
+                Effect: Allow
+                Action: [cloudformation:ValidateTemplate, cloudformation:CreateChangeSet, cloudformation:ListStacks]
+                Resource: '*'
+              - Sid: FunctionRoles            # create/manage the Lambda execution roles (name-scoped)
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:PassRole
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:UpdateAssumeRolePolicy
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/sector-in-brief-api-*
+              - Sid: Functions               # create/update/invoke the functions + URLs (name-scoped)
+                Effect: Allow
+                Action: [lambda:*]
+                Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:sector-in-brief-api-*
+              - Sid: FunctionsList
+                Effect: Allow
+                Action: [lambda:GetAccountSettings, lambda:ListFunctions]
+                Resource: '*'
+              - Sid: ResultsBuckets          # create the results bucket + smoke read/write
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:DeleteBucket
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:PutBucketLifecycleConfiguration
+                  - s3:GetBucketLifecycleConfiguration
+                  - s3:PutBucketTagging
+                  - s3:GetBucketTagging
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketPolicy
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:GetEncryptionConfiguration
+                  - s3:PutEncryptionConfiguration
+                Resource:
+                  - arn:aws:s3:::sector-in-brief-api-results-*
+                  - arn:aws:s3:::sector-in-brief-api-results-*/*
+              - Sid: SamArtifactBucket       # the `sam deploy --resolve-s3` managed bucket
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:ListBucket
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetBucketLocation
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketPolicy
+                  - s3:PutBucketVersioning
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:PutEncryptionConfiguration
+                Resource:
+                  - arn:aws:s3:::aws-sam-cli-managed-default-*
+                  - arn:aws:s3:::aws-sam-cli-managed-default-*/*
+              - Sid: Schedule                # the rollup's monthly EventBridge rule
+                Effect: Allow
+                Action:
+                  - events:PutRule
+                  - events:DeleteRule
+                  - events:PutTargets
+                  - events:RemoveTargets
+                  - events:DescribeRule
+                  - events:ListTargetsByRule
+                  - events:TagResource
+                  - events:UntagResource
+                Resource: !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/sector-in-brief-api-*
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:DescribeLogGroups
+                  - logs:PutRetentionPolicy
+                  - logs:TagResource
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/sector-in-brief-api-*
+
+Outputs:
+  RoleArn:
+    Description: Put this into the GitHub repo secret AWS_DEPLOY_ROLE_ARN
+    Value: !GetAtt DeployRole.Arn
