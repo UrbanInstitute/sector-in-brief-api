@@ -36,15 +36,19 @@ CloudShell gives the decisive **throughput rate**; from it the Lambda cutoff
 ## Path B — throwaway EC2 (only if you also want big-join completion timing)
 
 Use if you want the `large` tier (wide projection, multi-GB, exceeds CloudShell
-RAM). Run these **yourself**; tag clearly and terminate when done.
+RAM). Run these **yourself**; tag clearly and terminate when done. The `aws` calls
+below run from YOUR machine, so they need `--profile thiya`. (The harness running
+*on* the instance uses the `ec2-s3FullAccess` instance profile — no flag there.)
 
 ```bash
+P=thiya                              # your SSO profile for the local aws calls
 AMI=ami-0152204c1a187337c            # AL2023 x86_64 us-east-1 (re-fetch if stale)
 SUBNET=subnet-9d03a2b6               # default-VPC public subnet (us-east-1a)
 PROFILE=ec2-s3FullAccess             # existing instance profile w/ S3 access
 
 # launch (c5.2xlarge: 8 vCPU / 16 GB, up-to-10 Gbps)
-IID=$(aws ec2 run-instances --image-id $AMI --instance-type c5.2xlarge \
+IID=$(aws ec2 run-instances --profile $P --region us-east-1 \
+  --image-id $AMI --instance-type c5.2xlarge \
   --subnet-id $SUBNET --iam-instance-profile Name=$PROFILE \
   --associate-public-ip-address \
   --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=sector-in-brief-api-phase0-latency},{Key=owner,Value=YOUR_NAME},{Key=ttl,Value=delete-today}]' \
@@ -52,23 +56,29 @@ IID=$(aws ec2 run-instances --image-id $AMI --instance-type c5.2xlarge \
 echo "launched $IID"
 
 # wait for SSM to register, then run the harness via Run Command
-aws ssm wait instance-information-available --instance-information-filter-key InstanceIds --instance-information-filter-value-set $IID 2>/dev/null || sleep 60
+aws ssm wait instance-information-available --profile $P --region us-east-1 \
+  --instance-information-filter-key InstanceIds --instance-information-filter-value-set $IID 2>/dev/null || sleep 60
 
-aws ssm send-command --instance-ids $IID --document-name AWS-RunShellScript \
+CMD=$(aws ssm send-command --profile $P --region us-east-1 \
+  --instance-ids $IID --document-name AWS-RunShellScript \
   --comment "phase0 latency" \
   --parameters commands='["sudo dnf -y install python3-pip git >/dev/null 2>&1","pip3 install --quiet duckdb boto3","curl -s -o /tmp/m.py https://raw.githubusercontent.com/UrbanInstitute/sector-in-brief-api/main/phase0/measure_latency_inregion.py","python3 /tmp/m.py large 12GB"]' \
-  --query 'Command.CommandId' --output text
-# (fetch output once it completes)
-aws ssm list-command-invocations --command-id <CMD_ID> --details \
+  --query 'Command.CommandId' --output text)
+echo "command $CMD"
+
+# fetch output once it completes (Status -> Success)
+aws ssm list-command-invocations --profile $P --region us-east-1 \
+  --command-id $CMD --details \
   --query 'CommandInvocations[0].CommandPlugins[0].Output' --output text
 
 # TEAR DOWN — don't leave it running
-aws ec2 terminate-instances --instance-ids $IID
+aws ec2 terminate-instances --profile $P --region us-east-1 --instance-ids $IID
 ```
 
 Note: the `curl` of the harness assumes the repo/branch is pushed & public; if
-not, paste the script onto the box instead. Re-fetch `AMI` with:
-`aws ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 --query Parameter.Value --output text`
+not, paste the script onto the box instead (it has no `--profile` — it runs under
+the instance profile). Re-fetch `AMI` with:
+`aws ssm get-parameter --profile thiya --region us-east-1 --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 --query Parameter.Value --output text`
 
 ---
 
