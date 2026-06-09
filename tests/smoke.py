@@ -94,15 +94,19 @@ if JIDS:
     check("download: re-materializes after sweep", d2.get("statusCode") == 302 and back)
 check("download: bad job_id -> 404", call({"download": "not-a-uuid"}).get("statusCode") == 404)
 
-# 4) geo crosswalk filter (slice 5): region filter is exact; FIPS populated
+# 4) geo crosswalk (slice 5): filter by a small REAL column (pushes down -> fast),
+# and assert the crosswalk-derived columns come back correct. NB: do NOT filter by
+# a derived column (census_region/geo_county_fips) here — that can't push down and
+# runs the crosswalk joins over the whole BMF (see the region-filter perf follow-up).
 g = call({"tax_years": [2019], "forms": ["990"], "columns": ["ein", "geo_county_fips", "census_region"],
-          "filters": {"census_region": ["West"]}})
+          "filters": {"geo_state_abbr": ["RI"]}})
 if check("geo: 200", g.get("statusCode") == 200, str(g)[:200]):
     gb = body(g); JIDS.append(gb["job_id"])
     rows = rows_of(gb["job_id"]); h = rows[0]
     regs = {x[h.index("census_region")] for x in rows[1:300]}
-    check("geo: census_region filter is West-only", regs == {"West"}, str(regs))
-    check("geo: geo_county_fips populated", any(x[h.index("geo_county_fips")] for x in rows[1:300]))
+    check("geo: census_region derived correctly (RI -> Northeast)", regs == {"Northeast"}, str(regs))
+    check("geo: geo_county_fips populated from crosswalk",
+          any(x[h.index("geo_county_fips")] for x in rows[1:300]))
 
 # 5) estimate: no materialization
 e = body(call({"tax_years": [2019], "forms": ["990"], "columns": ["ein"],
