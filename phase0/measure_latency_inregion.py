@@ -18,13 +18,17 @@ Usage:
 
 Paste the final JSON block back to the assistant.
 """
-import sys, time, json, boto3, duckdb
+import os, sys, time, json, boto3, duckdb
 
 NCCS = "s3://nccsdata"
 BMF  = f"{NCCS}/geocoding/bmf-master/merged/bmf_master_geocoded.parquet"
 CORE = lambda glob: f"{NCCS}/processed/core/{glob}/990/core_*_990.parquet"
-OUT_BUCKET = "nccs-dataexplorer-stg"          # writable; soon-to-sunset legacy bucket
+# Output target. Set OUT_BUCKET=local to write to the box's /tmp (no S3-write
+# perms needed — captures the read-from-S3 + join cost, which is the bottleneck;
+# the in-region S3 upload of the result is fast and not what we're isolating).
+OUT_BUCKET = os.environ.get("OUT_BUCKET", "nccs-dataexplorer-stg")
 OUT_PREFIX = "phase0-inregion/"
+LOCAL = OUT_BUCKET == "local"
 
 PROJ = ("b.ein, b.org_name_display, b.org_addr_city, b.geo_state_abbr, "
         "b.ntee_common_code, c.total_revenue, c.total_assets_eoy, c.total_net_assets_eoy")
@@ -72,11 +76,14 @@ def run_tier(con, name, s3):
     proj = PROJ + (", c.* " if t.get("wide") else "")
     sql = (f"SELECT {proj} FROM read_parquet('{CORE(t['core'])}') c "
            f"JOIN read_parquet('{BMF}') b ON c.ein = b.ein WHERE {t['where']}")
-    key = f"{OUT_PREFIX}{name}.csv"
+    dest = f"/tmp/duckdb_out_{name}.csv" if LOCAL else f"s3://{OUT_BUCKET}/{OUT_PREFIX}{name}.csv"
     t0 = time.time(); rows = con.execute(f"SELECT count(*) FROM ({sql})").fetchone()[0]; t_count = time.time() - t0
-    t0 = time.time(); con.execute(f"COPY ({sql}) TO 's3://{OUT_BUCKET}/{key}' (FORMAT csv, HEADER);"); t_copy = time.time() - t0
-    size = s3.head_object(Bucket=OUT_BUCKET, Key=key)["ContentLength"]
-    s3.delete_object(Bucket=OUT_BUCKET, Key=key)
+    t0 = time.time(); con.execute(f"COPY ({sql}) TO '{dest}' (FORMAT csv, HEADER);"); t_copy = time.time() - t0
+    if LOCAL:
+        size = os.path.getsize(dest); os.remove(dest)
+    else:
+        size = s3.head_object(Bucket=OUT_BUCKET, Key=f"{OUT_PREFIX}{name}.csv")["ContentLength"]
+        s3.delete_object(Bucket=OUT_BUCKET, Key=f"{OUT_PREFIX}{name}.csv")
     mbps = (size / 1024 / 1024) / t_copy if t_copy else 0
     r = dict(tier=name, note=t["note"], rows=rows, bytes=size,
              count_s=round(t_count, 1), copy_s=round(t_copy, 1), copy_MB_s=round(mbps, 1))
@@ -103,7 +110,8 @@ def main():
             print(f"  {name:7s} FAILED: {type(e).__name__}: {str(e)[:140]}")
             results.append(dict(tier=name, failed=f"{type(e).__name__}: {str(e)[:140]}"))
     print("\n=== PASTE THIS BACK ===")
-    print(json.dumps(dict(region=region, duckdb=duckdb.__version__, mem_limit=mem, results=results)))
+    print(json.dumps(dict(region=region, out=("local" if LOCAL else OUT_BUCKET),
+                          duckdb=duckdb.__version__, mem_limit=mem, results=results)))
 
 
 if __name__ == "__main__":
