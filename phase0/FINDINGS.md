@@ -143,3 +143,32 @@ The two residual checks are dispositioned rather than blocking Phase-0:
 full rewrite (handler + `template.yaml` results bucket/lifecycle + `/download/{job_id}`
 + registry + SES receipt + NDJSON telemetry). Reconcile this decision back into
 `nccs-contracts` (ADR 0008 host + naming; ADR 0026 pattern B confirmed).
+
+## Check 2 result — build step 0, in-Lambda (2026-06-09): Lambda-first CONFIRMED ✅
+
+A real SAM-deployed Lambda (`sector-in-brief-api-step0-stg`, 10 GB / 900s / 10 GB
+ephemeral) ran the **worst realistic query** — wide projection (all ~250 core
+columns), all 990 tax years, all states, no filter — DuckDB EIN join →
+materialized to the **real** `sector-in-brief-api-results-stg` bucket:
+
+| metric | value |
+|--------|-------|
+| status | **success** (completed) |
+| peak memory | **6,027 MB / 10,240** (~60%, ~4 GB headroom) |
+| duration | 76.4s / 900s wall |
+| result | 4.70 GB, 3,751,511 rows |
+| **in-region S3-write** | **67 MB/s** end-to-end to the real bucket (closes the deferred Check 1) |
+
+**Conclusion:** Lambda handles the heaviest *realistic* single-form query well
+inside its ceilings. At ~67 MB/s the 900s wall is ~60 GB of headroom (> the 51 GB
+max), so **time is not the binding limit — join memory is, and it stayed at ~60%**
+on the worst case. **Lambda-first is confirmed.** The async non-Lambda worker is
+now reserved only for pathological *multi-tier* giants (990 + EZ + PF + legacy /
+efile spanning the 30–51 GB tail) whose build-side join could exceed 10 GB — to
+be re-checked if/when those query shapes are supported, not a launch blocker.
+
+Also flushed out (recorded above): core parquet **cross-vintage type drift** —
+multi-year reads require `union_by_name=True`.
+
+**Gate cleared → proceed to the full rewrite in this same stack** (the probe
+function gets replaced by the real handler; the results bucket + IAM stay).
