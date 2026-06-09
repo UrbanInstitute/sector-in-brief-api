@@ -114,10 +114,25 @@ on the widest/largest queries — a narrower question than "can it finish in tim
 3. **Track the core-parquet prerequisite** (ADR 0003) — production reads should
    not depend on the present-but-uncontracted core parquet until it's canonical.
 
-## Gate question
-In-region latency is in: **pattern B uniformly + a Lambda-first hybrid**
-(Lambda materializes p50–p95; async worker only for the p99+ giant). Two narrowed
-checks remain (in-region S3-write rate; wide-join peak memory vs Lambda's 10 GB).
-Go on starting the real rewrite (handler + `template.yaml` results
-bucket/lifecycle + `/download/{job_id}` + registry + SES receipt + NDJSON
-telemetry), running those two checks alongside the build?
+## Gate outcome — Phase-0 COMPLETE (2026-06-09)
+
+**Decision: pattern B uniformly + a Lambda-first hybrid** (Lambda materializes
+p50–p95 ≤ ~10 GB; async worker — Fargate/App Runner/Batch — only for the p99+
+giant, surfaced via ADR 0026 `/download/{job_id}`).
+
+The two residual checks are dispositioned rather than blocking Phase-0:
+
+- **Check 1 — in-region S3-write rate → deferred into the build.** Confident
+  prediction (in-region multipart upload is hundreds of MB/s; even ~50 MB/s stays
+  inside the wall); can't falsify the decision, and is measured truthfully against
+  the *real* results bucket + API role during the build, not a throwaway box.
+- **Check 2 — wide-join peak memory vs Lambda's 10 GB → the first, gated build
+  step.** The only residual that could still falsify "Lambda-first." Tested most
+  faithfully *in Lambda*: a thin real Lambda (DuckDB + real results bucket) running
+  the wide-tail query. If it OOMs, pivot the host then — having spent only a thin
+  Lambda, not the full rewrite.
+
+**Next:** build step 0 = the thin-Lambda Check-2 slice (gates the host); then the
+full rewrite (handler + `template.yaml` results bucket/lifecycle + `/download/{job_id}`
++ registry + SES receipt + NDJSON telemetry). Reconcile this decision back into
+`nccs-contracts` (ADR 0008 host + naming; ADR 0026 pattern B confirmed).
