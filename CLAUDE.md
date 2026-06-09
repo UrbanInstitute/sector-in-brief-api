@@ -30,11 +30,13 @@ Request shape:
 
 - `template.yaml` — SAM template (API Gateway, Lambda `nccs-api-query-${Stage}`, IAM).
 - `query/query.py` — **the deployed Lambda** (`CodeUri: ./query/`, handler `query.lambda_handler`); deps in `query/requirements.txt`.
-- `src/` — dev/setup scripts (`athena_setup.py`, `where_statement.py`, `send_email.py`,
-  `create_table_query.py`, `lambda_handler.py`, `s3_copy.py`, `table.py`). Some are
-  scratch/WIP with known bugs (e.g. `where_statement.py` references an undefined
-  `query`; `lambda_handler.py` uses `json`/`boto3`/`sender_email` without importing them).
-- `data/core_schema.csv` — schema used to generate the Athena `CREATE TABLE`.
+- `phase0/` — Phase-0 vertical-slice spike + findings (ADR 0008/0026): the
+  DuckDB-on-parquet join→materialize→presign path (`duckdb_query.py`), the real
+  result-size measurement (`measure_results.py`), and the host-decision writeup
+  (`FINDINGS.md`). Not the production handler; informs it.
+- `src/` — **deleted** in Phase-0 (the Athena setup/scratch scripts, per ADR 0008).
+- `data/core_schema.csv` — schema used to generate the Athena `CREATE TABLE`
+  (legacy; slated for removal once the rewrite settles column-allowlist validation).
 - `.github/workflows/sam_pipeline.yaml` — CI/CD (stg/prod).
 - `tests/test_query.py`, `events/event.json` — tests + sample event.
 

@@ -25,6 +25,7 @@ htmlcov/
 .venv/
 venv/
 env/
+.phase0-venv/
 
 # Editor / OS
 .vscode/
