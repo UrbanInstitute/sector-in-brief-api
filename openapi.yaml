@@ -1,0 +1,143 @@
+openapi: 3.1.0
+info:
+  title: sector-in-brief-api
+  version: 0.1.0
+  description: >
+    Modernized NCCS data-download API (ADR 0008 / 0026). DuckDB-on-parquet:
+    joins the contracted CORE tiers + bmf-master-geocoded on EIN at query time
+    (ADR 0016, no pre-merged table), materializes the result to S3, and returns
+    presigned URLs (pattern B — bytes never flow through the API process).
+
+    Interface contract per ADR 0026 §5 (OpenAPI lives in this repo, not
+    nccs-contracts). This is the slice-1 surface: synchronous /data via a Lambda
+    Function URL (no API Gateway 29s cap). The durable /download/{job_id} +
+    request registry + email receipt + telemetry land in later slices.
+
+    Column names are the NEW parquet names (e.g. ein, geo_state_abbr,
+    total_revenue) — there is no backward-compat mapping to the legacy
+    pre-merged table's column names; the dashboard form is reworked to match
+    (ADR 0026 §6).
+
+servers:
+  - url: https://{functionUrlId}.lambda-url.us-east-1.on.aws
+    variables:
+      functionUrlId: { default: REPLACE_WITH_DEPLOYED_FUNCTION_URL_ID }
+
+paths:
+  /data:
+    post:
+      operationId: createExport
+      summary: Run a filtered EIN-join export and return presigned download URLs.
+      description: >
+        Validates the requested columns/filters against the live parquet schema
+        (column names are whitelisted — the SQL-injection guard, since
+        identifiers can't be parameterized; filter values are bound parameters),
+        runs the DuckDB join across the requested core tax-year partitions joined
+        to bmf-master-geocoded on EIN, writes the result to the results bucket,
+        and assembles a merged data dictionary (from the per-dataset
+        dictionaries, filtered to the delivered columns). Synchronous: returns
+        when materialization completes (Function URL allows up to 900s).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExportRequest' }
+      responses:
+        '200':
+          description: Export materialized; presigned URLs returned.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ExportResponse' }
+        '400':
+          description: Validation error (unknown column, empty selection, bad filter).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /download/{job_id}:
+    get:
+      operationId: getDownload
+      summary: (Slice 2 — placeholder) Durable link; re-issues a presigned URL or re-materializes.
+      description: >
+        Stub for ADR 0026 §2. Not implemented in slice 1. Will resolve a stored
+        request (registry sidecar) to a fresh presigned URL, re-running the query
+        if the result object has been swept by the 30-day lifecycle.
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '302': { description: Redirect to a freshly-issued presigned URL. }
+        '404': { description: Unknown job_id. }
+
+components:
+  schemas:
+    ExportRequest:
+      type: object
+      required: [tax_years, columns]
+      additionalProperties: false
+      properties:
+        tax_years:
+          type: array
+          minItems: 1
+          items: { type: integer, minimum: 1989 }
+          description: Core 990 tax-year partitions to read (selects which parquet files).
+          example: [2019, 2020]
+        form:
+          type: string
+          default: "990"
+          enum: ["990"]
+          description: Core form tier. Slice 1 supports 990; other tiers (990ez/990pf/combined/legacy) are a later extension.
+        columns:
+          type: array
+          minItems: 1
+          items: { type: string }
+          description: >
+            Output columns by new parquet name, from core or bmf-master-geocoded.
+            Validated against the live schema allowlist. `ein` always included.
+          example: [ein, org_name_display, geo_state_abbr, ntee_common_code, total_revenue, total_assets_eoy]
+        filters:
+          type: object
+          additionalProperties:
+            type: array
+            items: { type: string }
+          description: column -> allowed values; combined as WHERE col IN (...) AND ... (values are bound parameters).
+          example: { geo_state_abbr: [CA, NY], ntee_common_code: [A] }
+        format:
+          type: string
+          enum: [csv, parquet]
+          default: csv
+        email:
+          type: string
+          format: email
+          description: Requester email (receipt is default-on from slice 3; ignored in slice 1).
+    ExportResponse:
+      type: object
+      required: [job_id, row_count, result, data_dictionary]
+      properties:
+        job_id: { type: string, format: uuid }
+        row_count: { type: integer }
+        result:
+          type: object
+          properties:
+            format: { type: string, enum: [csv, parquet] }
+            bytes: { type: integer }
+            url: { type: string, format: uri, description: Presigned URL (TTL ≤ object lifetime). }
+            expires_in_seconds: { type: integer }
+        data_dictionary:
+          type: object
+          description: Merged from the per-dataset dictionaries, filtered to delivered columns.
+          properties:
+            url: { type: string, format: uri }
+            columns: { type: integer }
+            schema:
+              type: array
+              items: { type: string }
+              default: [column, source, description, data_type, null_pct]
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        detail: { type: string }
