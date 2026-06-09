@@ -48,6 +48,8 @@ Resources:
         Variables:
           RESULTS_BUCKET: !Ref ResultsBucket
           URL_TTL_SECONDS: "3600"
+          SENDER_EMAIL: tpoongundranar@urban.org          # verified SES sender (urban.org domain)
+          DOWNLOAD_BASE_URL: !GetAtt DownloadFunctionUrl.FunctionUrl  # public link for the email receipt
       FunctionUrlConfig:
         AuthType: AWS_IAM             # callers (dashboard server) sign SigV4; testable via direct invoke
         Cors:
@@ -69,13 +71,60 @@ Resources:
               Effect: Allow
               Action: [s3:PutObject, s3:GetObject]
               Resource: !Sub arn:aws:s3:::sector-in-brief-api-results-${Stage}/*
+            - Sid: SendReceipt         # ADR 0026 §3 default-on email receipt
+              Effect: Allow
+              Action: [ses:SendEmail]
+              Resource: "*"
+
+  # Public download endpoint (ADR 0026 §2/§3): the emailed link must be clickable
+  # without AWS signing, so this is a SEPARATE Function URL with AuthType NONE,
+  # gated (DOWNLOAD_ONLY) to refuse /data. Same code as QueryFunction.
+  DownloadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub sector-in-brief-api-download-${Stage}
+      CodeUri: ./query/
+      Handler: query.lambda_handler
+      Architectures: [x86_64]
+      MemorySize: 10240               # re-materialize-on-expiry can be heavy
+      Timeout: 900
+      EphemeralStorage:
+        Size: 10240
+      Environment:
+        Variables:
+          RESULTS_BUCKET: !Ref ResultsBucket
+          URL_TTL_SECONDS: "3600"
+          DOWNLOAD_ONLY: "true"
+      FunctionUrlConfig:
+        AuthType: NONE                # public — clicked from email
+        Cors:
+          AllowOrigins: ["*"]
+          AllowMethods: [GET]
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            - Sid: ReadNccsData
+              Effect: Allow
+              Action: [s3:GetObject]
+              Resource: arn:aws:s3:::nccsdata/*
+            - Sid: ListNccsData
+              Effect: Allow
+              Action: [s3:ListBucket]
+              Resource: arn:aws:s3:::nccsdata
+            - Sid: ReadWriteResults    # reads registry; re-materializes on expiry
+              Effect: Allow
+              Action: [s3:PutObject, s3:GetObject]
+              Resource: !Sub arn:aws:s3:::sector-in-brief-api-results-${Stage}/*
 
 Outputs:
   QueryFunctionUrl:
-    Description: POST /data endpoint (Function URL)
+    Description: POST /data endpoint (Function URL, AWS_IAM)
     Value: !GetAtt QueryFunctionUrl.FunctionUrl
+  DownloadFunctionUrl:
+    Description: Public GET /download/{job_id} endpoint (the emailed link base)
+    Value: !GetAtt DownloadFunctionUrl.FunctionUrl
   QueryFunction:
-    Description: Function name (for direct-invoke testing)
+    Description: Query function name (for direct-invoke testing)
     Value: !Ref QueryFunction
   ResultsBucket:
     Value: !Ref ResultsBucket

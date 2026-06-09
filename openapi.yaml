@@ -13,6 +13,10 @@ info:
     Function URL (no API Gateway 29s cap). The durable /download/{job_id} +
     request registry + email receipt + telemetry land in later slices.
 
+    Auth: POST /data is on a Function URL with AuthType AWS_IAM (the dashboard
+    server signs SigV4). GET /download/{job_id} is a SEPARATE, public Function
+    URL (AuthType NONE) so the emailed receipt link is clickable without signing.
+
     Column names are the NEW parquet names (e.g. ein, geo_state_abbr,
     total_revenue) — there is no backward-compat mapping to the legacy
     pre-merged table's column names; the dashboard form is reworked to match
@@ -135,8 +139,17 @@ components:
         row_count: { type: integer }
         download_path:
           type: string
-          description: Durable endpoint for this export, e.g. /download/{job_id} (the emailed link).
+          description: Durable endpoint for this export, e.g. /download/{job_id}.
           example: /download/f169b367-eee8-4c74-bb44-bb4ca4e8d558
+        download_url:
+          type: [string, "null"]
+          description: Absolute durable link (public download Function URL + download_path) — the link emailed to the requester.
+        email:
+          type: [object, "null"]
+          description: Present when the request carried an email; the default-on receipt (ADR 0026 §3).
+          properties:
+            to: { type: string, format: email }
+            status: { type: string, enum: [sent], description: "or failure marker e.g. failed:<Error>" }
         result:
           type: object
           properties:

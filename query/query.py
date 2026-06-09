@@ -25,6 +25,9 @@ BMF = f"{NCCS}/geocoding/bmf-master/merged/bmf_master_geocoded.parquet"
 BMF_DICT = f"{NCCS}/geocoding/bmf-master/merged/bmf_master_geocoded_data_dictionary.csv"
 RESULTS_BUCKET = os.environ["RESULTS_BUCKET"]
 URL_TTL = int(os.environ.get("URL_TTL_SECONDS", "3600"))   # <= object lifetime (30d)
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL")              # verified SES sender; receipt is sent if set
+DOWNLOAD_BASE_URL = os.environ.get("DOWNLOAD_BASE_URL", "")  # public /download Function URL (for the email link)
+DOWNLOAD_ONLY = bool(os.environ.get("DOWNLOAD_ONLY"))     # public download function: refuse /data
 ALL_FORMS = ["990", "990ez", "990pf", "990combined"]
 EXT = {"csv": "csv", "parquet": "parquet"}
 JOB_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -185,6 +188,29 @@ def _exists(s3, key):
         return False
 
 
+# ---- email receipt (ADR 0026 §3, default-on) ---------------------------------
+def _send_receipt(email, download_url):
+    """Best-effort: a failed receipt must not fail the export."""
+    if not (email and SENDER_EMAIL):
+        return "skipped:no_sender" if email else None
+    text = (f"Your NCCS data export is ready. Download it here:\n{download_url}\n\n"
+            "This link stays valid: the file is kept for 30 days, and the link "
+            "regenerates it on demand after that. Questions? nccs@urban.org")
+    html = (f"<p>Your NCCS data export is ready.</p>"
+            f'<p><a href="{download_url}">Download your data</a></p>'
+            "<p>This link stays valid — the file is kept for 30 days and the link "
+            'regenerates it on demand after that.</p>'
+            '<p>Questions? <a href="mailto:nccs@urban.org">nccs@urban.org</a></p>')
+    try:
+        boto3.client("ses", region_name="us-east-1").send_email(
+            Source=SENDER_EMAIL, Destination={"ToAddresses": [email]},
+            Message={"Subject": {"Data": "Your NCCS data export is ready"},
+                     "Body": {"Text": {"Data": text}, "Html": {"Data": html}}})
+        return "sent"
+    except Exception as e:  # noqa: BLE001
+        return f"failed:{type(e).__name__}"
+
+
 # ---- routes ------------------------------------------------------------------
 def _create_export(event, s3):
     req = _parse_body(event)
@@ -192,16 +218,20 @@ def _create_export(event, s3):
     plan = _plan(con, req)
     job_id = str(uuid.uuid4())
     m = _materialize(con, plan, job_id, s3)
+    email = req.get("email")
     registry = {
         "job_id": job_id,
         "request": {"tax_years": plan["years"], "forms": plan["forms"],
                     "columns": plan["cols"], "filters": plan["filters"], "format": plan["fmt"]},
-        "email": req.get("email"),
+        "email": email,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "result_key": m["result_key"],
     }
     s3.put_object(Bucket=RESULTS_BUCKET, Key=f"requests/{job_id}.json",
                   Body=json.dumps(registry), ContentType="application/json")
+    base = DOWNLOAD_BASE_URL.rstrip("/")
+    download_url = f"{base}/download/{job_id}" if base else f"/download/{job_id}"
+    receipt = _send_receipt(email, download_url) if email else None
     return _resp(200, {
         "job_id": job_id,
         "row_count": m["row_count"],
@@ -209,6 +239,8 @@ def _create_export(event, s3):
                    "url": _presign(s3, m["result_key"]), "expires_in_seconds": URL_TTL},
         "data_dictionary": {"url": _presign(s3, m["dict_key"]), "columns": m["columns"]},
         "download_path": f"/download/{job_id}",
+        "download_url": download_url if base else None,
+        "email": {"to": email, "status": receipt} if email else None,
     })
 
 
@@ -233,10 +265,14 @@ def lambda_handler(event, context):
         rc = event.get("requestContext", {}) if isinstance(event, dict) else {}
         method = rc.get("http", {}).get("method")
         raw = event.get("rawPath", "") if isinstance(event, dict) else ""
-        if method == "GET" and raw.startswith("/download/"):
+        is_download = (method == "GET" and raw.startswith("/download/"))
+        direct_download = isinstance(event, dict) and event.get("download")
+        if is_download:
             return _download(raw[len("/download/"):], s3)
-        if isinstance(event, dict) and event.get("download"):   # direct-invoke test hook
+        if direct_download:                                     # direct-invoke test hook
             return _download(event["download"], s3)
+        if DOWNLOAD_ONLY:                                       # public download function: no /data
+            return _resp(403, {"error": "forbidden", "detail": "this endpoint only serves downloads"})
         return _create_export(event, s3)
     except BadRequest as e:
         return _resp(400, {"error": "validation_error", "detail": str(e)})
