@@ -189,18 +189,35 @@ def _exists(s3, key):
 
 
 # ---- email receipt (ADR 0026 §3, default-on) ---------------------------------
-def _send_receipt(email, download_url):
-    """Best-effort: a failed receipt must not fail the export."""
+CONTACT = "tpoongundranar@urban.org"
+
+
+def _send_receipt(email, info):
+    """Best-effort receipt (ADR 0026 §3): a failed send must not fail the export.
+    info: data_url, dict_url, row_count, format, tax_years, forms, columns, filters, job_id."""
     if not (email and SENDER_EMAIL):
-        return "skipped:no_sender" if email else None
-    text = (f"Your NCCS data export is ready. Download it here:\n{download_url}\n\n"
-            "This link stays valid: the file is kept for 30 days, and the link "
-            "regenerates it on demand after that. Questions? nccs@urban.org")
-    html = (f"<p>Your NCCS data export is ready.</p>"
-            f'<p><a href="{download_url}">Download your data</a></p>'
-            "<p>This link stays valid — the file is kept for 30 days and the link "
-            'regenerates it on demand after that.</p>'
-            '<p>Questions? <a href="mailto:nccs@urban.org">nccs@urban.org</a></p>')
+        return "skipped:no_sender"
+    flt = info["filters"]
+    flt_str = "; ".join(f"{k}: {', '.join(map(str, v))}" for k, v in flt.items()) if flt else "none"
+    summary = [("Rows", f"{info['row_count']:,}"), ("Format", info["format"].upper()),
+               ("Tax years", ", ".join(map(str, info["tax_years"]))),
+               ("Form types", ", ".join(info["forms"])),
+               ("Columns", ", ".join(info["columns"])), ("Filters", flt_str),
+               ("Reference ID", info["job_id"])]
+    text = ("Your NCCS data export is ready.\n\n"
+            f"Download your data:\n{info['data_url']}\n\n"
+            f"Download the data dictionary (explains each column):\n{info['dict_url']}\n\n"
+            "Your export:\n" + "\n".join(f"  {k}: {v}" for k, v in summary) + "\n\n"
+            "These links stay valid: the files are kept for 30 days, and the links "
+            f"regenerate them on demand after that.\n\nQuestions? {CONTACT}")
+    rows = "".join(f"<tr><td><b>{k}</b>&nbsp;</td><td>{v}</td></tr>" for k, v in summary)
+    html = ("<p>Your NCCS data export is ready.</p>"
+            f'<p><a href="{info["data_url"]}">Download your data</a></p>'
+            f'<p><a href="{info["dict_url"]}">Download the data dictionary</a> (explains each column)</p>'
+            f"<p><b>Your export</b></p><table>{rows}</table>"
+            "<p>These links stay valid — the files are kept for 30 days and the links "
+            "regenerate them on demand after that.</p>"
+            f'<p>Questions? <a href="mailto:{CONTACT}">{CONTACT}</a></p>')
     try:
         boto3.client("ses", region_name="us-east-1").send_email(
             Source=SENDER_EMAIL, Destination={"ToAddresses": [email]},
@@ -230,8 +247,12 @@ def _create_export(event, s3):
     s3.put_object(Bucket=RESULTS_BUCKET, Key=f"requests/{job_id}.json",
                   Body=json.dumps(registry), ContentType="application/json")
     base = DOWNLOAD_BASE_URL.rstrip("/")
-    download_url = f"{base}/download/{job_id}" if base else f"/download/{job_id}"
-    receipt = _send_receipt(email, download_url) if email else None
+    data_url = f"{base}/download/{job_id}" if base else f"/download/{job_id}"
+    dict_url = f"{data_url}?kind=dictionary"
+    receipt = _send_receipt(email, {
+        "data_url": data_url, "dict_url": dict_url, "row_count": m["row_count"],
+        "format": m["format"], "tax_years": plan["years"], "forms": plan["forms"],
+        "columns": plan["cols"], "filters": plan["filters"], "job_id": job_id}) if email else None
     return _resp(200, {
         "job_id": job_id,
         "row_count": m["row_count"],
@@ -239,24 +260,26 @@ def _create_export(event, s3):
                    "url": _presign(s3, m["result_key"]), "expires_in_seconds": URL_TTL},
         "data_dictionary": {"url": _presign(s3, m["dict_key"]), "columns": m["columns"]},
         "download_path": f"/download/{job_id}",
-        "download_url": download_url if base else None,
+        "download_url": data_url if base else None,
+        "dictionary_download_url": dict_url if base else None,
         "email": {"to": email, "status": receipt} if email else None,
     })
 
 
-def _download(job_id, s3):
+def _download(job_id, s3, kind="result"):
     if not JOB_RE.match(job_id or ""):
         return _resp(404, {"error": "unknown_job"})
     try:
         registry = json.loads(s3.get_object(Bucket=RESULTS_BUCKET, Key=f"requests/{job_id}.json")["Body"].read())
     except Exception:
         return _resp(404, {"error": "unknown_job"})
-    result_key = registry["result_key"]
-    if not _exists(s3, result_key):                  # swept by the 30-day lifecycle -> re-run
-        con = _con()
+    target_key = (f"results/{job_id}_dictionary.csv" if kind == "dictionary"
+                  else registry["result_key"])
+    if not _exists(s3, target_key):                  # swept by the 30-day lifecycle -> re-run
+        con = _con()                                  # re-materialize regenerates BOTH result + dict
         plan = _plan(con, registry["request"])
         _materialize(con, plan, job_id, s3)
-    return {"statusCode": 302, "headers": {"Location": _presign(s3, result_key)}}
+    return {"statusCode": 302, "headers": {"Location": _presign(s3, target_key)}}
 
 
 def lambda_handler(event, context):
@@ -268,9 +291,10 @@ def lambda_handler(event, context):
         is_download = (method == "GET" and raw.startswith("/download/"))
         direct_download = isinstance(event, dict) and event.get("download")
         if is_download:
-            return _download(raw[len("/download/"):], s3)
+            kind = (event.get("queryStringParameters") or {}).get("kind", "result")
+            return _download(raw[len("/download/"):], s3, kind)
         if direct_download:                                     # direct-invoke test hook
-            return _download(event["download"], s3)
+            return _download(event["download"], s3, event.get("kind", "result"))
         if DOWNLOAD_ONLY:                                       # public download function: no /data
             return _resp(403, {"error": "forbidden", "detail": "this endpoint only serves downloads"})
         return _create_export(event, s3)
