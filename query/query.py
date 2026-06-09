@@ -190,6 +190,18 @@ def _exists(s3, key):
 
 # ---- email receipt (ADR 0026 §3, default-on) ---------------------------------
 CONTACT = "tpoongundranar@urban.org"
+DOCS_URL = os.environ.get("DOCS_URL", "https://nccs.urban.org")   # confirm the canonical docs URL
+CITATION = ("National Center for Charitable Statistics (NCCS), Urban Institute. "
+            "Data accessed via the NCCS Data API.")
+
+
+def _double_count_note(forms):
+    """990combined already unions 990 + 990-EZ; flag if selected alongside them."""
+    if "990combined" in forms and ({"990", "990ez"} & set(forms)):
+        return ("Note: this export includes 990combined (which already unions 990 and "
+                "990-EZ) alongside 990 and/or 990-EZ, so some organizations may appear "
+                "more than once.")
+    return ""
 
 
 def _send_receipt(email, info):
@@ -204,19 +216,29 @@ def _send_receipt(email, info):
                ("Form types", ", ".join(info["forms"])),
                ("Columns", ", ".join(info["columns"])), ("Filters", flt_str),
                ("Reference ID", info["job_id"])]
+    caveat = _double_count_note(info["forms"])
+    caveat_txt = f"\n{caveat}\n" if caveat else ""
+    caveat_html = f'<p style="color:#b45309">{caveat}</p>' if caveat else ""
     text = ("Your NCCS data export is ready.\n\n"
             f"Download your data:\n{info['data_url']}\n\n"
             f"Download the data dictionary (explains each column):\n{info['dict_url']}\n\n"
-            "Your export:\n" + "\n".join(f"  {k}: {v}" for k, v in summary) + "\n\n"
+            "Your export:\n" + "\n".join(f"  {k}: {v}" for k, v in summary) + "\n"
+            f"{caveat_txt}\n"
             "These links stay valid: the files are kept for 30 days, and the links "
-            f"regenerate them on demand after that.\n\nQuestions? {CONTACT}")
+            "regenerate them on demand after that.\n\n"
+            f"Column definitions & methodology: {DOCS_URL}\n"
+            f"How to cite: {CITATION}\n\n"
+            f"Questions? {CONTACT}")
     rows = "".join(f"<tr><td><b>{k}</b>&nbsp;</td><td>{v}</td></tr>" for k, v in summary)
     html = ("<p>Your NCCS data export is ready.</p>"
             f'<p><a href="{info["data_url"]}">Download your data</a></p>'
             f'<p><a href="{info["dict_url"]}">Download the data dictionary</a> (explains each column)</p>'
             f"<p><b>Your export</b></p><table>{rows}</table>"
+            f"{caveat_html}"
             "<p>These links stay valid — the files are kept for 30 days and the links "
             "regenerate them on demand after that.</p>"
+            f'<p>Column definitions &amp; methodology: <a href="{DOCS_URL}">{DOCS_URL}</a></p>'
+            f"<p><b>How to cite:</b> {CITATION}</p>"
             f'<p>Questions? <a href="mailto:{CONTACT}">{CONTACT}</a></p>')
     try:
         boto3.client("ses", region_name="us-east-1").send_email(
@@ -229,10 +251,28 @@ def _send_receipt(email, info):
 
 
 # ---- routes ------------------------------------------------------------------
+def _estimate(con, plan):
+    """ADR 0026 §6 size pre-check: exact row_count + sampled byte estimate, no
+    materialization / S3 write / email. The dashboard gates the export UX on this."""
+    sql, params = _build_sql(plan["cols"], plan["filters"], plan["src"], plan["core_paths"])
+    rows = con.execute(f"SELECT count(*) FROM ({sql})", params).fetchone()[0]
+    est_bytes = 0
+    if rows:
+        sample = "/tmp/est_sample.csv"
+        con.execute(f"COPY (SELECT * FROM ({sql}) LIMIT 5000) TO '{sample}' (FORMAT csv, HEADER);", params)
+        n = min(5000, rows)
+        est_bytes = int(os.path.getsize(sample) / n * rows)
+        os.remove(sample)
+    return _resp(200, {"estimate": True, "row_count": rows,
+                       "columns": len(plan["cols"]), "estimated_bytes": est_bytes})
+
+
 def _create_export(event, s3):
     req = _parse_body(event)
     con = _con()
     plan = _plan(con, req)
+    if req.get("estimate"):                  # size pre-check only — return early
+        return _estimate(con, plan)
     job_id = str(uuid.uuid4())
     m = _materialize(con, plan, job_id, s3)
     email = req.get("email")

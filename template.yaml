@@ -50,6 +50,7 @@ Resources:
           URL_TTL_SECONDS: "3600"
           SENDER_EMAIL: tpoongundranar@urban.org          # verified SES sender (urban.org domain)
           DOWNLOAD_BASE_URL: !GetAtt DownloadFunctionUrl.FunctionUrl  # public link for the email receipt
+          DOCS_URL: https://nccs.urban.org                # methodology/column docs link in the receipt (confirm)
       FunctionUrlConfig:
         AuthType: AWS_IAM             # callers (dashboard server) sign SigV4; testable via direct invoke
         Cors:

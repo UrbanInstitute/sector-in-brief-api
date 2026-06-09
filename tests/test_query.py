@@ -4,7 +4,7 @@ os.environ.setdefault("RESULTS_BUCKET", "test-bucket")  # query.py reads this at
 
 import pytest
 from query.query import (_validate, _build_sql, _dictionary_sql, _core_parquets,
-                         _sql_list, BadRequest)
+                         _sql_list, _double_count_note, BadRequest)
 
 # fake column->source map (core wins overlaps): ein/total_revenue core; the rest bmf
 SRC = {"ein": "c", "total_revenue": "c",
@@ -60,3 +60,11 @@ def test_core_parquets_is_years_x_forms():
 
 def test_sql_list_quotes_paths():
     assert _sql_list(["a", "b"]) == "['a', 'b']"
+
+
+def test_double_count_note_only_when_combined_overlaps():
+    assert _double_count_note(["990combined", "990"])        # overlap -> warn
+    assert _double_count_note(["990", "990ez", "990combined"])
+    assert not _double_count_note(["990combined"])           # combined alone -> fine
+    assert not _double_count_note(["990", "990ez"])          # no combined -> fine
+    assert not _double_count_note(["990pf", "990combined"])  # pf doesn't overlap combined

@@ -130,7 +130,15 @@ components:
         email:
           type: string
           format: email
-          description: Requester email (receipt is default-on from slice 3; ignored in slice 1).
+          description: Requester email; a default-on receipt with the durable links is sent (ADR 0026 §3).
+        estimate:
+          type: boolean
+          default: false
+          description: >
+            Size pre-check only (ADR 0026 §6). Returns {row_count, columns,
+            estimated_bytes} from an exact count + a 5k-row sample — no
+            materialization, no S3 write, no email. The dashboard calls this to
+            warn before a large export.
     ExportResponse:
       type: object
       required: [job_id, row_count, result, data_dictionary, download_path]
