@@ -108,6 +108,15 @@ if check("geo: 200", g.get("statusCode") == 200, str(g)[:200]):
     check("geo: geo_county_fips populated from crosswalk",
           any(x[h.index("geo_county_fips")] for x in rows[1:300]))
 
+# 4b) census_region filter expands to states (slice 5.1) — intersect with RI to stay tiny
+gr = call({"tax_years": [2019], "forms": ["990"], "columns": ["ein", "geo_state_abbr", "census_region"],
+           "filters": {"census_region": ["Northeast"], "geo_state_abbr": ["RI"]}})
+if check("geo: region filter (5.1) -> 200", gr.get("statusCode") == 200, str(gr)[:200]):
+    grb = body(gr); JIDS.append(grb["job_id"])
+    rows = rows_of(grb["job_id"]); h = rows[0]
+    sts = {x[h.index("geo_state_abbr")] for x in rows[1:300]}
+    check("geo: census_region filter resolves to states (RI ∩ Northeast = RI)", sts == {"RI"}, str(sts))
+
 # 5) estimate: no materialization
 e = body(call({"tax_years": [2019], "forms": ["990"], "columns": ["ein"],
                "filters": {"geo_state_abbr": ["RI"]}, "estimate": True}))

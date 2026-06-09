@@ -4,8 +4,8 @@ os.environ.setdefault("RESULTS_BUCKET", "test-bucket")  # query.py reads this at
 
 import pytest
 from query.query import (_validate, _build_sql, _dictionary_sql, _core_parquets,
-                         _sql_list, _double_count_note, _region_case, CENSUS_REGION,
-                         BadRequest)
+                         _sql_list, _double_count_note, _region_case, _expand_region_filter,
+                         CENSUS_REGION, BadRequest)
 
 # fake column->source map (core wins overlaps): ein/total_revenue core; the rest bmf
 SRC = {"ein": "c", "total_revenue": "c",
@@ -90,3 +90,20 @@ def test_dictionary_sql_emits_crosswalk_part_for_derived_columns():
                                   {"geo_county_fips": "b", "census_region": "b"}, ["s3://d.csv"])
     assert "'crosswalk'" in sql and "geo_county_fips" in sql
     assert params == []         # derived entries are literals, not bound params / dict lookups
+
+
+def test_expand_region_filter_to_states():
+    f = _expand_region_filter({"census_region": ["Northeast"]})
+    assert "census_region" not in f                              # derived filter is gone
+    assert set(f["geo_state_abbr"]) == set(CENSUS_REGION["Northeast"])  # -> pushdown-able states
+
+
+def test_expand_region_intersects_with_explicit_state_filter():
+    f = _expand_region_filter({"census_region": ["West"], "geo_state_abbr": ["CA", "NY"]})
+    assert f["geo_state_abbr"] == ["CA"]        # NY is Northeast -> AND drops it
+
+
+def test_expand_region_passthrough_and_unknown():
+    assert _expand_region_filter({"geo_state_abbr": ["RI"]}) == {"geo_state_abbr": ["RI"]}
+    with pytest.raises(BadRequest):
+        _expand_region_filter({"census_region": ["Westt"]})

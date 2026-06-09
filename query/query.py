@@ -207,6 +207,24 @@ def _dictionary_sql(cols, src, core_dicts):
 
 
 # ---- plan / materialize ------------------------------------------------------
+def _expand_region_filter(filters):
+    """census_region is a DERIVED column (CASE over state), so a filter on it can't
+    push down — DuckDB would enrich the whole BMF before filtering. Translate it to
+    an equivalent geo_state_abbr filter (a real column) so it pushes to the parquet
+    scan. AND semantics: if a state filter is also present, intersect."""
+    if "census_region" not in filters:
+        return filters
+    unknown = [r for r in filters["census_region"] if r not in CENSUS_REGION]
+    if unknown:
+        raise BadRequest(f"unknown census_region(s): {unknown}; valid: {list(CENSUS_REGION)}")
+    states = set().union(*(CENSUS_REGION[r] for r in filters["census_region"]))
+    out = {k: v for k, v in filters.items() if k != "census_region"}
+    if "geo_state_abbr" in out:
+        states &= set(out["geo_state_abbr"])
+    out["geo_state_abbr"] = sorted(states)
+    return out
+
+
 def _plan(con, req):
     years = req.get("tax_years") or []
     forms = req.get("forms", ALL_FORMS)
@@ -217,6 +235,7 @@ def _plan(con, req):
     core_paths = _core_parquets(years, forms)
     src = _column_sources(con, core_paths)
     years, forms, cols, filters, fmt = _validate(req, src)
+    filters = _expand_region_filter(filters)   # region -> states, so it pushes down (slice 5.1)
     return dict(years=years, forms=forms, cols=cols, filters=filters, fmt=fmt, src=src, core_paths=core_paths)
 
 
