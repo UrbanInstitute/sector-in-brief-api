@@ -1,0 +1,2 @@
+duckdb
+# boto3 is already provided by the Lambda python runtime — do not bundle it.

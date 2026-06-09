@@ -1,0 +1,74 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  sector-in-brief-api build step 0 — Check 2 probe. Creates the real results
+  bucket (+ 30-day lifecycle, ADR 0008) and a DuckDB Lambda that runs the
+  wide-tail EIN join to test whether the Lambda-first host decision survives the
+  10 GB memory ceiling. This stack is the SEED for the build — keep it and grow
+  the template into the real handler; do not delete it after the probe (that
+  would drop the results bucket).
+
+Parameters:
+  Stage:
+    Type: String
+    Default: stg
+    AllowedValues: [stg, prod]
+
+Globals:
+  Function:
+    Runtime: python3.12
+    LoggingConfig:
+      LogFormat: JSON
+
+Resources:
+  ResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub sector-in-brief-api-results-${Stage}
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-results-30d        # ADR 0008: 30-day lifecycle from day one
+            Status: Enabled
+            ExpirationInDays: 30
+
+  Check2Function:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub sector-in-brief-api-check2-${Stage}
+      CodeUri: ./
+      Handler: app.lambda_handler
+      Architectures: [x86_64]
+      MemorySize: 10240               # Lambda max — the ceiling under test
+      Timeout: 900                    # 15 min max
+      EphemeralStorage:
+        Size: 10240                   # /tmp for DuckDB spill on the wide join
+      Environment:
+        Variables:
+          RESULTS_BUCKET: !Ref ResultsBucket
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            - Sid: ReadNccsData        # read-only on the contracted data lake
+              Effect: Allow
+              Action: [s3:GetObject]
+              Resource: arn:aws:s3:::nccsdata/*
+            - Sid: ListNccsData
+              Effect: Allow
+              Action: [s3:ListBucket]
+              Resource: arn:aws:s3:::nccsdata
+            - Sid: WriteResults
+              Effect: Allow
+              Action: [s3:PutObject, s3:GetObject, s3:DeleteObject]
+              Resource: !Sub arn:aws:s3:::sector-in-brief-api-results-${Stage}/*
+            - Sid: ListResults
+              Effect: Allow
+              Action: [s3:ListBucket]
+              Resource: !Sub arn:aws:s3:::sector-in-brief-api-results-${Stage}
+
+Outputs:
+  Check2Function:
+    Description: Probe function name — invoke this for Check 2
+    Value: !Ref Check2Function
+  ResultsBucket:
+    Description: Results bucket (kept; seeds the build)
+    Value: !Ref ResultsBucket
