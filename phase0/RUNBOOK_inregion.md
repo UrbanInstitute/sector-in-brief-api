@@ -40,6 +40,15 @@ RAM). Run these **yourself**; tag clearly and terminate when done. The `aws` cal
 below run from YOUR machine, so they need `--profile thiya`. (The harness running
 *on* the instance uses the `ec2-s3FullAccess` instance profile — no flag there.)
 
+Prereqs (from your machine, repo root): stage the harness in S3 so the box pulls
+it without any GitHub dependency, and silence the AWS CLI pager so polling output
+doesn't drop you into `less`:
+```bash
+export AWS_PAGER=""
+aws s3 cp --profile thiya phase0/measure_latency_inregion.py \
+  s3://nccs-dataexplorer-stg/phase0-inregion/m.py
+```
+
 ```bash
 P=thiya                              # your SSO profile for the local aws calls
 AMI=ami-0152204c1a187337c            # AL2023 x86_64 us-east-1 (re-fetch if stale)
@@ -62,7 +71,7 @@ aws ssm wait instance-information-available --profile $P --region us-east-1 \
 CMD=$(aws ssm send-command --profile $P --region us-east-1 \
   --instance-ids $IID --document-name AWS-RunShellScript \
   --comment "phase0 latency" \
-  --parameters commands='["sudo dnf -y install python3-pip git >/dev/null 2>&1","pip3 install --quiet duckdb boto3","curl -s -o /tmp/m.py https://raw.githubusercontent.com/UrbanInstitute/sector-in-brief-api/main/phase0/measure_latency_inregion.py","python3 /tmp/m.py large 12GB"]' \
+  --parameters commands='["sudo dnf -y install python3-pip","python3 -m pip install duckdb boto3","aws s3 cp s3://nccs-dataexplorer-stg/phase0-inregion/m.py /tmp/m.py","python3 /tmp/m.py large 12GB"]' \
   --query 'Command.CommandId' --output text)
 echo "command $CMD"
 
@@ -75,9 +84,11 @@ aws ssm list-command-invocations --profile $P --region us-east-1 \
 aws ec2 terminate-instances --profile $P --region us-east-1 --instance-ids $IID
 ```
 
-Note: the `curl` of the harness assumes the repo/branch is pushed & public; if
-not, paste the script onto the box instead (it has no `--profile` — it runs under
-the instance profile). Re-fetch `AMI` with:
+Note: the box pulls the harness from S3 (`aws s3 cp` in the command array, under
+the instance profile — no `--profile`), so no GitHub push is needed; just run the
+S3-upload prereq above first. If a step fails, re-send just the failed commands.
+Use `python3 -m pip` (not `pip3 ... --quiet`) to avoid a coreutils-`install`
+arg-parsing clash. Re-fetch `AMI` with:
 `aws ssm get-parameter --profile thiya --region us-east-1 --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 --query Parameter.Value --output text`
 
 ---
