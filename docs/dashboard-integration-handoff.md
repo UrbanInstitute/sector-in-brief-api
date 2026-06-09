@@ -80,17 +80,18 @@ is the durable public one.
 | org type | `nteev2_org_type` | ✅ supported |
 | `SUBSECTOR` | `nteev2_subsector` | ✅ supported |
 | `TAX_YEAR` | `tax_years` (partition selector, not a filter) | ✅ supported |
-| `CENSUS_COUNTY` | `geo_county` is the **raw geocoder label** only | ⚠️ **API gap** |
-| `CENSUS_CBSA` | `geo_metro_area` (name) only | ⚠️ **API gap** |
-| `CENSUS_REGION` | none | ⚠️ **API gap** |
-| `Size` (asset bucket) | `total_assets_eoy` is numeric; API does `IN`, not ranges | ⚠️ **API gap** |
+| `CENSUS_COUNTY` | `geo_county_fips` (canonical; filter by FIPS, not name) + `geo_county_canonical` | ✅ supported (slice 5) |
+| `CENSUS_CBSA` | `cbsa_code` / `cbsa_title` (+ `csa_*`) | ✅ supported (slice 5) |
+| `CENSUS_REGION` | `census_region` | ✅ supported (slice 5) |
+| `Size` (asset bucket) | `total_assets_eoy` is numeric; API does `IN`, not ranges | ⚠️ **API gap** (deferred by product) |
 
-**Coordinate these back to the API maintainer before relying on them:** reliable
-county/CBSA/region filtering needs the API to join the published crosswalks
-(county-fips, cbsa, CT planning-region — ADR 0021/0023), and asset-size needs
-either a derived size column or range-filter support. For a first cut, ship the
-✅ filters (state / org type / subsector / years) and stage the ⚠️ ones pending API
-enhancements — don't silently map them to unreliable raw columns.
+The geographic columns are **crosswalk-derived** by the API (ADR 0021/0023),
+mirroring `sector-in-brief-data`'s `read_bmf.R`/`derive_dimensions.R` so they match
+the dashboard's panels: county by `(state, raw county)` label join with
+ambiguous→NULL, **Connecticut resolved by coordinate** (planning regions), CBSA on
+the canonical FIPS, region from state. **Filter county by `geo_county_fips`, not by
+name** (the FIPS is the stable key; raw names collide). Asset-size was deferred by
+product — not in the API; revisit if the form needs it.
 
 ## Don't break the viz panels
 The dashboard is a **hybrid consumer** (ADR 0011): visualization panels read S3

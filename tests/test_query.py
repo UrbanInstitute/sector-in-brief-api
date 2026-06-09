@@ -4,7 +4,8 @@ os.environ.setdefault("RESULTS_BUCKET", "test-bucket")  # query.py reads this at
 
 import pytest
 from query.query import (_validate, _build_sql, _dictionary_sql, _core_parquets,
-                         _sql_list, _double_count_note, BadRequest)
+                         _sql_list, _double_count_note, _region_case, CENSUS_REGION,
+                         BadRequest)
 
 # fake column->source map (core wins overlaps): ein/total_revenue core; the rest bmf
 SRC = {"ein": "c", "total_revenue": "c",
@@ -68,3 +69,24 @@ def test_double_count_note_only_when_combined_overlaps():
     assert not _double_count_note(["990combined"])           # combined alone -> fine
     assert not _double_count_note(["990", "990ez"])          # no combined -> fine
     assert not _double_count_note(["990pf", "990combined"])  # pf doesn't overlap combined
+
+
+def test_census_region_covers_50_states_plus_dc_uniquely():
+    allstates = [s for states in CENSUS_REGION.values() for s in states]
+    assert len(allstates) == len(set(allstates))   # no state in two regions
+    assert len(allstates) == 51                      # 50 states + DC
+    for st, reg in {"CT": "Northeast", "CA": "West", "TX": "South",
+                    "IL": "Midwest", "NY": "Northeast"}.items():
+        assert st in CENSUS_REGION[reg]
+
+
+def test_region_case_sql_shape():
+    sql = _region_case()
+    assert sql.startswith("CASE") and "'Northeast'" in sql and "b.geo_state_abbr IN" in sql
+
+
+def test_dictionary_sql_emits_crosswalk_part_for_derived_columns():
+    sql, params = _dictionary_sql(["geo_county_fips", "census_region"],
+                                  {"geo_county_fips": "b", "census_region": "b"}, ["s3://d.csv"])
+    assert "'crosswalk'" in sql and "geo_county_fips" in sql
+    assert params == []         # derived entries are literals, not bound params / dict lookups

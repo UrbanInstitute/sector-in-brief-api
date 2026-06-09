@@ -113,9 +113,14 @@ components:
           minItems: 1
           items: { type: string }
           description: >
-            Output columns by new parquet name, from core or bmf-master-geocoded.
-            Validated against the live schema allowlist. `ein` always included.
-          example: [ein, org_name_display, geo_state_abbr, ntee_common_code, total_revenue, total_assets_eoy]
+            Output columns by new parquet name. Sources: core, bmf-master-geocoded,
+            and crosswalk-derived geographic columns the API composes (ADR 0021/0023,
+            mirroring sector-in-brief-data): `geo_county_fips` (canonical 5-char
+            county GEOID — filter by THIS, not name), `geo_county_canonical`,
+            `cbsa_code`, `cbsa_title`, `cbsa_type`, `csa_code`, `csa_title`,
+            `census_region`. Validated against the live schema allowlist; `ein`
+            always included.
+          example: [ein, org_name_display, geo_state_abbr, geo_county_fips, geo_county_canonical, cbsa_title, census_region, ntee_common_code, total_revenue]
         filters:
           type: object
           additionalProperties:

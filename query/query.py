@@ -23,6 +23,33 @@ from datetime import datetime, timezone
 NCCS = "s3://nccsdata"
 BMF = f"{NCCS}/geocoding/bmf-master/merged/bmf_master_geocoded.parquet"
 BMF_DICT = f"{NCCS}/geocoding/bmf-master/merged/bmf_master_geocoded_data_dictionary.csv"
+
+# Consumer-composed geographic crosswalk joins (ADR 0021/0023), mirroring
+# sector-in-brief-data/R/{county_crosswalk,read_bmf,derive_dimensions}.R so the
+# API's county/CBSA/region match the dashboard's panels.
+XW = f"{NCCS}/crosswalks"
+CXW_COUNTY = f"{XW}/county-fips/county_fips_crosswalk.parquet"   # join (geo_state_abbr, geo_county_raw)
+CXW_CBSA = f"{XW}/cbsa/cbsa_crosswalk.parquet"                   # join county_fips
+CXW_CT = f"{XW}/ct-planning-region/ct_planning_region_crosswalk.parquet"  # CT by %.2f (lat,lon)
+CENSUS_REGION = {  # exact mirror of derive_census_region()
+    "Northeast": ["CT", "ME", "MA", "NH", "RI", "VT", "NJ", "NY", "PA"],
+    "Midwest": ["IL", "IN", "MI", "OH", "WI", "IA", "KS", "MN", "MO", "NE", "ND", "SD"],
+    "South": ["DE", "DC", "FL", "GA", "MD", "NC", "SC", "VA", "WV", "AL", "KY", "MS",
+              "TN", "AR", "LA", "OK", "TX"],
+    "West": ["AZ", "CO", "ID", "MT", "NV", "NM", "UT", "WY", "AK", "CA", "HI", "OR", "WA"],
+}
+# Columns the crosswalk joins add (not in core/bmf dicts) -> static dictionary entries.
+DERIVED_COLUMNS = {
+    "geo_county_fips": ("Canonical county GEOID (5-char FIPS); filter by this, not name. "
+                        "NA when the raw label was ambiguous/unresolved.", "character"),
+    "geo_county_canonical": ("Canonical Census county name (NAMELSAD); CT resolved by coordinate.", "character"),
+    "cbsa_code": ("OMB Core-Based Statistical Area code", "character"),
+    "cbsa_title": ("Metro/Micro area title", "character"),
+    "cbsa_type": ("Metropolitan or Micropolitan Statistical Area", "character"),
+    "csa_code": ("Combined Statistical Area code", "character"),
+    "csa_title": ("Combined Statistical Area title", "character"),
+    "census_region": ("US Census region (Northeast/Midwest/South/West), derived from state.", "character"),
+}
 RESULTS_BUCKET = os.environ["RESULTS_BUCKET"]
 URL_TTL = int(os.environ.get("URL_TTL_SECONDS", "3600"))   # <= object lifetime (30d)
 SENDER_EMAIL = os.environ.get("SENDER_EMAIL")              # verified SES sender; receipt is sent if set
@@ -63,11 +90,41 @@ def _con():
     return con
 
 
+def _region_case():
+    whens = " ".join(
+        f"WHEN b.geo_state_abbr IN ({', '.join(repr(s) for s in states)}) THEN {region!r}"
+        for region, states in CENSUS_REGION.items())
+    return f"CASE {whens} END"
+
+
+def _bmf_source():
+    """bmf-master-geocoded enriched with the crosswalk-derived geo columns. Aliased `b`.
+    Mirrors sector-in-brief-data/R/read_bmf.R: county-label join (ambiguous->NULL),
+    CT override by %.2f coordinate, CBSA on the coalesced FIPS, region from state."""
+    return f"""(
+      SELECT b.*,
+        COALESCE(cf.geo_county_fips, ct.geo_county_fips)             AS geo_county_fips,
+        COALESCE(cf.geo_county_canonical, ct.geo_county_canonical)   AS geo_county_canonical,
+        cb.cbsa_code, cb.cbsa_title, cb.cbsa_type, cb.csa_code, cb.csa_title,
+        {_region_case()}                                            AS census_region
+      FROM read_parquet('{BMF}') b
+      LEFT JOIN read_parquet('{CXW_COUNTY}') cf
+        ON b.geo_state_abbr = cf.geo_state_abbr AND b.geo_county = cf.geo_county_raw
+      LEFT JOIN read_parquet('{CXW_CT}') ct
+        ON b.geo_state_abbr = 'CT'
+        AND printf('%.2f', b.geo_lat) = printf('%.2f', ct.lat2)
+        AND printf('%.2f', b.geo_lon) = printf('%.2f', ct.lon2)
+      LEFT JOIN read_parquet('{CXW_CBSA}') cb
+        ON COALESCE(cf.geo_county_fips, ct.geo_county_fips) = cb.county_fips
+    )"""
+
+
 def _column_sources(con, core_paths):
-    """Map every queryable column to its alias: 'c' (core) wins overlaps, else 'b' (bmf)."""
+    """Map every queryable column to its alias: 'c' (core) wins overlaps, else 'b'
+    (enriched bmf, incl. the crosswalk-derived geo columns)."""
     core_cols = [r[0] for r in con.execute(
         f"DESCRIBE SELECT * FROM read_parquet({_sql_list(core_paths)}, union_by_name=true)").fetchall()]
-    bmf_cols = [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{BMF}')").fetchall()]
+    bmf_cols = [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {_bmf_source()} b").fetchall()]
     src = {c: "b" for c in bmf_cols}
     src.update({c: "c" for c in core_cols})   # core wins on overlap (e.g. ein)
     return src
@@ -117,13 +174,14 @@ def _build_sql(cols, filters, src, core_paths):
         where = "WHERE " + " AND ".join(clauses)
     sql = (f"SELECT {select} "
            f"FROM read_parquet({_sql_list(core_paths)}, union_by_name=true) c "
-           f'JOIN read_parquet(\'{BMF}\') b ON c."ein" = b."ein" {where}')
+           f'JOIN {_bmf_source()} b ON c."ein" = b."ein" {where}')
     return sql, params
 
 
 def _dictionary_sql(cols, src, core_dicts):
-    core_cols = [c for c in cols if src[c] == "c"]
-    bmf_cols = [c for c in cols if src[c] == "b"]
+    derived = [c for c in cols if c in DERIVED_COLUMNS]
+    core_cols = [c for c in cols if src[c] == "c" and c not in DERIVED_COLUMNS]
+    bmf_cols = [c for c in cols if src[c] == "b" and c not in DERIVED_COLUMNS]
     parts, params = [], []
     if core_cols:
         parts.append(
@@ -138,6 +196,13 @@ def _dictionary_sql(cols, src, core_dicts):
             "type AS data_type, null_pct "
             f"FROM read_csv('{BMF_DICT}') WHERE column_name IN ({', '.join(['?'] * len(bmf_cols))})")
         params += bmf_cols
+    if derived:   # crosswalk-derived geo columns -> static entries (not in core/bmf dicts)
+        vals = ", ".join(
+            "('{c}', 'crosswalk', '{d}', '{t}')".format(
+                c=c, d=DERIVED_COLUMNS[c][0].replace("'", "''"), t=DERIVED_COLUMNS[c][1])
+            for c in derived)
+        parts.append('SELECT "column", source, description, data_type, CAST(NULL AS DOUBLE) AS null_pct '
+                     f'FROM (VALUES {vals}) AS t("column", source, description, data_type)')
     return " UNION ALL ".join(parts), params
 
 
