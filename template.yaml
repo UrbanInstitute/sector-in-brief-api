@@ -26,15 +26,12 @@ Resources:
       BucketName: !Sub sector-in-brief-api-results-${Stage}
       LifecycleConfiguration:
         Rules:
-          - Id: expire-results-30d        # ADR 0008: 30-day lifecycle. Scoped to results/
-            Status: Enabled               # so the requests/ registry (ADR 0026 §2) persists
-            Filter:                        # on a longer clock — the two-clocks rule.
-              Prefix: results/
-            ExpirationInDays: 30
-          - Id: abort-incomplete-mpu      # hygiene: don't leave dangling multipart uploads
+          # ADR 0008: 30-day lifecycle. Scoped to results/ so the requests/
+          # registry (ADR 0026 §2) persists on a longer clock — the two-clocks rule.
+          - Id: expire-results-30d
             Status: Enabled
-            AbortIncompleteMultipartUpload:
-              DaysAfterInitiation: 1
+            Prefix: results/
+            ExpirationInDays: 30
 
   QueryFunction:
     Type: AWS::Serverless::Function
