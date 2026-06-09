@@ -71,9 +71,13 @@ So the Lambda-vs-App-Runner line for the **materialization worker** is not yet
 nailed; it needs an **in-region** rerun. But the size distribution already bounds
 it hard.
 
+> The misleading-mean result here is generalized as reusable technical-writing
+> material in [`docs/fat-tails-and-the-misleading-mean.md`](../docs/fat-tails-and-the-misleading-mean.md).
+
 ## Recommendation (for go/no-go)
 
-1. **Adopt pattern B uniformly** for the form path (decided by data).
+1. **Adopt pattern B uniformly** for the form path — **DECIDED 2026-06-09**
+   (confirmed by data: 38.5% of results exceed the 6 MB inline cap).
 2. **Host: App Runner for materialization** (or an always-on/async non-Lambda
    worker), because the heavy tail (5.6% > 10 GB, max 51 GB) exceeds Lambda's hard
    ceilings and any 15-min wall. A **hybrid** stays open — Lambda/light sync for
