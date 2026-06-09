@@ -49,6 +49,9 @@ DERIVED_COLUMNS = {
     "csa_code": ("Combined Statistical Area code", "character"),
     "csa_title": ("Combined Statistical Area title", "character"),
     "census_region": ("US Census region (Northeast/Midwest/South/West), derived from state.", "character"),
+    "org_type": ("IRS 501(c) subsection classification; 501(c)(3) split into Public Charities "
+                 "vs Private Foundations (mirrors sector-in-brief-data derive_organization_type).",
+                 "character"),
 }
 RESULTS_BUCKET = os.environ["RESULTS_BUCKET"]
 URL_TTL = int(os.environ.get("URL_TTL_SECONDS", "3600"))   # <= object lifetime (30d)
@@ -97,6 +100,26 @@ def _region_case():
     return f"CASE {whens} END"
 
 
+def _org_type_case():
+    """Byte-for-byte mirror of sector-in-brief-data derive_organization_type(
+    subsection_code, foundation_code) — incl. the 501(c)(3) PC/PF split and the
+    Public-Charities catch-all default. (subsection_code/foundation_code are
+    VARCHAR in bmf; foundation_code compared as string.)"""
+    sc = "TRY_CAST(b.subsection_code AS INTEGER)"
+    return (
+        "CASE "
+        f"WHEN {sc} IS NULL THEN '501(c)(3) Public Charities' "
+        f"WHEN {sc} = 3 AND b.foundation_code IN ('2','3','4') THEN '501(c)(3) Private Foundations' "
+        f"WHEN {sc} = 3 THEN '501(c)(3) Public Charities' "
+        f"WHEN {sc} BETWEEN 1 AND 29 THEN '501(c)(' || {sc} || ')' "
+        f"WHEN {sc} = 40 THEN '501(c)(d)' "
+        f"WHEN {sc} = 50 THEN '501(c)(e)' "
+        f"WHEN {sc} = 60 THEN '501(c)(f)' "
+        f"WHEN {sc} = 70 THEN '501(c)(k)' "
+        "ELSE '501(c)(3) Public Charities' END"
+    )
+
+
 def _bmf_source():
     """bmf-master-geocoded enriched with the crosswalk-derived geo columns. Aliased `b`.
     Mirrors sector-in-brief-data/R/read_bmf.R: county-label join (ambiguous->NULL),
@@ -106,7 +129,8 @@ def _bmf_source():
         COALESCE(cf.geo_county_fips, ct.geo_county_fips)             AS geo_county_fips,
         COALESCE(cf.geo_county_canonical, ct.geo_county_canonical)   AS geo_county_canonical,
         cb.cbsa_code, cb.cbsa_title, cb.cbsa_type, cb.csa_code, cb.csa_title,
-        {_region_case()}                                            AS census_region
+        {_region_case()}                                            AS census_region,
+        {_org_type_case()}                                          AS org_type
       FROM read_parquet('{BMF}') b
       LEFT JOIN read_parquet('{CXW_COUNTY}') cf
         ON b.geo_state_abbr = cf.geo_state_abbr AND b.geo_county = cf.geo_county_raw

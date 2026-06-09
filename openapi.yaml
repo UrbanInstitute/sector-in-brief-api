@@ -114,20 +114,23 @@ components:
           items: { type: string }
           description: >
             Output columns by new parquet name. Sources: core, bmf-master-geocoded,
-            and crosswalk-derived geographic columns the API composes (ADR 0021/0023,
-            mirroring sector-in-brief-data): `geo_county_fips` (canonical 5-char
-            county GEOID — filter by THIS, not name), `geo_county_canonical`,
+            and API-derived columns it composes (mirroring sector-in-brief-data):
+            crosswalk geography (ADR 0021/0023) — `geo_county_fips` (canonical
+            5-char county GEOID — filter by THIS, not name), `geo_county_canonical`,
             `cbsa_code`, `cbsa_title`, `cbsa_type`, `csa_code`, `csa_title`,
-            `census_region`. Validated against the live schema allowlist; `ein`
-            always included.
-          example: [ein, org_name_display, geo_state_abbr, geo_county_fips, geo_county_canonical, cbsa_title, census_region, ntee_common_code, total_revenue]
+            `census_region`; and `org_type` (IRS 501(c) subsection classification,
+            with 501(c)(3) split into Public Charities vs Private Foundations —
+            this is the dashboard's Organization Type filter, NOT `nteev2_org_type`,
+            a separate NTEE-V2 dimension). Validated against the live schema
+            allowlist; `ein` always included.
+          example: [ein, org_name_display, org_type, geo_state_abbr, geo_county_fips, census_region, nteev2_subsector, total_revenue]
         filters:
           type: object
           additionalProperties:
             type: array
             items: { type: string }
           description: column -> allowed values; combined as WHERE col IN (...) AND ... (values are bound parameters).
-          example: { geo_state_abbr: [CA, NY], ntee_common_code: [A] }
+          example: { geo_state_abbr: [CA, NY], org_type: ["501(c)(3) Private Foundations"] }
         format:
           type: string
           enum: [csv, parquet]

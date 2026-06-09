@@ -117,6 +117,15 @@ if check("geo: region filter (5.1) -> 200", gr.get("statusCode") == 200, str(gr)
     sts = {x[h.index("geo_state_abbr")] for x in rows[1:300]}
     check("geo: census_region filter resolves to states (RI ∩ Northeast = RI)", sts == {"RI"}, str(sts))
 
+# 4c) org_type derived column (mirrors the producer's 501(c)(3) PC/PF split)
+ot = call({"tax_years": [2019], "forms": ["990"], "columns": ["ein", "subsection_code", "foundation_code"],
+           "filters": {"geo_state_abbr": ["DC"], "org_type": ["501(c)(3) Private Foundations"]}})
+if check("org_type: PF filter -> 200", ot.get("statusCode") == 200, str(ot)[:200]):
+    otb = body(ot); JIDS.append(otb["job_id"]); rows = rows_of(otb["job_id"]); h = rows[0]
+    si, fi = h.index("subsection_code"), h.index("foundation_code")
+    check("org_type: PF = subsection 3 + foundation 2/3/4",
+          all(r[si] == "3" and r[fi] in ("2", "3", "4") for r in rows[1:]))
+
 # 5) estimate: no materialization
 e = body(call({"tax_years": [2019], "forms": ["990"], "columns": ["ein"],
                "filters": {"geo_state_abbr": ["RI"]}, "estimate": True}))

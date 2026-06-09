@@ -77,7 +77,7 @@ is the durable public one.
 | Legacy form filter | New API column | Status |
 |---|---|---|
 | `CENSUS_STATE_ABBR` | `geo_state_abbr` | ✅ supported |
-| org type | `nteev2_org_type` | ✅ supported |
+| Organization Type | `org_type` (IRS 501(c) subsection; 501(c)(3) split into Public Charities / Private Foundations) | ✅ supported — derived, mirrors producer. **NOT** `nteev2_org_type` (a separate NTEE-V2 dimension; still available but not the org-type filter) |
 | `SUBSECTOR` | `nteev2_subsector` | ✅ supported |
 | `TAX_YEAR` | `tax_years` (partition selector, not a filter) | ✅ supported |
 | `CENSUS_COUNTY` | `geo_county_fips` (canonical; filter by FIPS, not name) + `geo_county_canonical` | ✅ supported (slice 5) |

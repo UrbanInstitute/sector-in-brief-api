@@ -5,7 +5,7 @@ os.environ.setdefault("RESULTS_BUCKET", "test-bucket")  # query.py reads this at
 import pytest
 from query.query import (_validate, _build_sql, _dictionary_sql, _core_parquets,
                          _sql_list, _double_count_note, _region_case, _expand_region_filter,
-                         CENSUS_REGION, BadRequest)
+                         _org_type_case, DERIVED_COLUMNS, CENSUS_REGION, BadRequest)
 
 # fake column->source map (core wins overlaps): ein/total_revenue core; the rest bmf
 SRC = {"ein": "c", "total_revenue": "c",
@@ -107,3 +107,14 @@ def test_expand_region_passthrough_and_unknown():
     assert _expand_region_filter({"geo_state_abbr": ["RI"]}) == {"geo_state_abbr": ["RI"]}
     with pytest.raises(BadRequest):
         _expand_region_filter({"census_region": ["Westt"]})
+
+
+def test_org_type_is_derived_and_mirrors_producer_case():
+    assert "org_type" in DERIVED_COLUMNS                      # selectable + in the dictionary
+    sql = _org_type_case()
+    # the PC/PF split, the c(3) order (before the generic range), and the catch-all default
+    assert "'501(c)(3) Private Foundations'" in sql and "'501(c)(3) Public Charities'" in sql
+    assert "b.foundation_code IN ('2','3','4')" in sql
+    assert sql.index("= 3 AND") < sql.index("BETWEEN 1 AND 29")   # c(3) handled before the range
+    assert "'501(c)(d)'" in sql and "'501(c)(k)'" in sql
+    assert sql.rstrip().endswith("ELSE '501(c)(3) Public Charities' END")
