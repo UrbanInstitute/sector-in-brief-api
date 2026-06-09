@@ -58,18 +58,42 @@ but the tail is enormous. The mean (1.6 GB) describes no actual query.
   Lambda's hard 10 GB memory/`/tmp` ceiling outright; 25.6% exceed the 100 MB
   async line.
 
-## What the spike could NOT decide — and the next measurement
+## Gate 3 — in-region latency (measured 2026-06-09, EC2 c5.2xlarge, us-east-1) ✅
 
-Latency was measured **from a local WSL machine**, so every httpfs read and S3
-write crossed the public internet, not the in-region AWS network. Treat these as
-a badly biased **lower bound**, not the in-region truth:
-- 3.75M-row all-years 990 ⋈ bmf join **counted in 5.8s** (DuckDB column/predicate
-  pushdown is excellent), but **materializing 0.32 GB took 219s (~1.5 MB/s)** —
-  dominated by local→S3 egress and full remote parquet reads with no cache.
+The WSL spike measured latency **from outside AWS**, so every httpfs read crossed
+the public internet — a badly biased lower bound. The in-region rerun (operator-run
+EC2 to keep control-plane calls off the assistant session) settles it. Output
+written to local `/tmp` to isolate the read-from-S3 + join cost (the box's
+`ec2-s3FullAccess` role can read `nccsdata` but is denied PutObject on the results
+bucket; the in-region S3 upload of the result is fast and not the bottleneck):
 
-So the Lambda-vs-App-Runner line for the **materialization worker** is not yet
-nailed; it needs an **in-region** rerun. But the size distribution already bounds
-it hard.
+| tier | rows | result | count | copy | throughput |
+|------|------|--------|-------|------|------------|
+| small (one state-year) | 32,751 | 2.9 MB | 1.7s | 2.4s | ~4s total wall (overhead-bound) |
+| medium (all years × all states) | 3,751,511 | 331 MB | 1.4s | 3.2s | **104 MB/s** |
+
+**The same all-years join that took 219s / 1.5 MB/s from WSL took 3.2s / 104 MB/s
+in-region — a ~70× speedup.** The WSL latency was almost entirely egress; it is
+*not* a host signal.
+
+### This reframes the host decision — throughput is no longer the binding limit
+
+At ~100 MB/s, Lambda's **15-min wall is ~90 GB of headroom** — larger than the
+51 GB observed max. So wall-time no longer rules Lambda out, and with DuckDB
+streaming `COPY` straight to S3 (no full-result buffering) the 10 GB `/tmp` ceiling
+doesn't bind either. The remaining Lambda constraint is **join memory** (10 GB cap)
+on the widest/largest queries — a narrower question than "can it finish in time."
+
+- p50 (0.1 MB) / p75 (117 MB): materialize in **well under a second to ~2s** — trivially Lambda.
+- ~10 GB (p95): **~100–200s** end-to-end — inside Lambda's 900s wall, *if* the join fits in 10 GB memory.
+- 30–51 GB (p99–max): **~300–1000s** — approaches/exceeds the wall, and wide joins may exceed 10 GB memory. These few still want an async/long-running worker.
+
+### Still open before committing IaC (narrowed)
+1. **In-region S3-write throughput** — we measured local write; confirm the result
+   upload rate (expected fast, but close the loop).
+2. **Peak join memory on the wide/`large` tier** vs Lambda's 10 GB cap — run the
+   `c.*` wide projection and watch RSS.
+3. **Confirm DuckDB streams `COPY` to S3** without buffering the whole result.
 
 > The misleading-mean result here is generalized as reusable technical-writing
 > material in [`docs/fat-tails-and-the-misleading-mean.md`](../docs/fat-tails-and-the-misleading-mean.md).
@@ -78,19 +102,22 @@ it hard.
 
 1. **Adopt pattern B uniformly** for the form path — **DECIDED 2026-06-09**
    (confirmed by data: 38.5% of results exceed the 6 MB inline cap).
-2. **Host: App Runner for materialization** (or an always-on/async non-Lambda
-   worker), because the heavy tail (5.6% > 10 GB, max 51 GB) exceeds Lambda's hard
-   ceilings and any 15-min wall. A **hybrid** stays open — Lambda/light sync for
-   the 0.1 MB median common case, App Runner/async for the tail — and App Runner's
-   persistent process buys a local DuckDB cache to amortize httpfs reads.
-3. **Confirm with one in-region measurement** before committing IaC: run
-   `phase0/duckdb_query.py` on a p90-ish (multi-GB) query from inside us-east-1
-   (a throwaway EC2/App Runner/Lambda in-region) and record true throughput.
-4. **Track the core-parquet prerequisite** (ADR 0003) — production reads should
+2. **Host: Lambda-first hybrid** (revised after the in-region measurement, which
+   reversed the earlier App-Runner lean). In-region throughput (~100 MB/s) puts
+   the p50–p95 of the distribution — everything up to ~10 GB — comfortably inside
+   Lambda's 15-min wall, so **Lambda handles the overwhelming majority of
+   materializations**. Route only the rare p99+ giant (30–51 GB) and any
+   memory-heavy wide join to an **async non-Lambda worker** (Fargate/App
+   Runner/Batch), surfaced through ADR 0026's durable `/download/{job_id}` so the
+   caller just polls. Decide Lambda-only-with-async-tail vs always-async after
+   the two narrowed checks above (S3-write rate, wide-join memory).
+3. **Track the core-parquet prerequisite** (ADR 0003) — production reads should
    not depend on the present-but-uncontracted core parquet until it's canonical.
 
 ## Gate question
-Go on **App Runner (or async worker) for materialization, pattern B uniformly**,
-pending the one in-region latency confirmation? On "go" the next step is the real
-rewrite (handler + `template.yaml` results bucket/lifecycle + `/download/{job_id}`
-+ registry + SES receipt + NDJSON telemetry) and deleting the Athena scratch.
+In-region latency is in: **pattern B uniformly + a Lambda-first hybrid**
+(Lambda materializes p50–p95; async worker only for the p99+ giant). Two narrowed
+checks remain (in-region S3-write rate; wide-join peak memory vs Lambda's 10 GB).
+Go on starting the real rewrite (handler + `template.yaml` results
+bucket/lifecycle + `/download/{job_id}` + registry + SES receipt + NDJSON
+telemetry), running those two checks alongside the build?
