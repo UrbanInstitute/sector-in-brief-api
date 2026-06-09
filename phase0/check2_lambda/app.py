@@ -48,7 +48,11 @@ def lambda_handler(event, context):
             else f"{BMF_COLS}, c.total_revenue, c.total_assets_eoy, c.total_net_assets_eoy")
     where = "WHERE b.geo_state_abbr = ?" if state else ""
     params = [state] if state else []
-    sql = (f"SELECT {proj} FROM read_parquet('{core}') c "
+    # union_by_name=True: core parquet types drift across tax-year files (e.g.
+    # gross_income_other is INT in early years, DOUBLE in 2015). DuckDB otherwise
+    # infers the glob schema from the first file and fails the cast. Any
+    # multi-year core read needs this. (Ground truth, Phase-0 step 0.)
+    sql = (f"SELECT {proj} FROM read_parquet('{core}', union_by_name=True) c "
            f"JOIN read_parquet('{BMF}') b ON c.ein = b.ein {where}")
 
     con = _con()

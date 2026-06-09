@@ -32,6 +32,13 @@ straight to S3** (ADR 0026 pattern B), returned as a presigned URL.
 - **DuckDB's own `credential_chain` cannot resolve this account's SSO assumed-role
   session.** We resolve credentials via boto3 and hand DuckDB an explicit S3
   secret — the same shape the eventual instance-role → boto3 → DuckDB flow uses.
+- **Core parquet types drift across tax-year files** (step-0 probe, all-years
+  `c.*`): `gross_income_other` is `INTEGER` in early years but `DOUBLE` (5.8 B,
+  out of INT32 range) in 2015. DuckDB infers a parquet glob's schema from the
+  first file and fails the cast. **Any multi-year core read must use
+  `read_parquet(..., union_by_name=True)`** (or pinned types). Reinforces the
+  core-parquet-canonical prerequisite — a contract that promotes parquet to
+  canonical should also assert cross-vintage schema/type stability.
 
 ## Gate 2 — result-size distribution (decides the host) ✅
 
