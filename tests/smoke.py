@@ -126,6 +126,23 @@ if check("org_type: PF filter -> 200", ot.get("statusCode") == 200, str(ot)[:200
     check("org_type: PF = subsection 3 + foundation 2/3/4",
           all(r[si] == "3" and r[fi] in ("2", "3", "4") for r in rows[1:]))
 
+# 4d) nteev2_subsector_definition derived label (OVERRIDES the raw bmf column with
+# the dashboard-canonical map; must be null-free and consistent with the code).
+SUBSECTOR_DEF = {  # independent oracle = sector-in-brief-data table_builder_subsector.R
+    "ART": "Arts, Culture, and Humanities", "EDU": "Education (minus Universities)",
+    "HEL": "Health (minus Hospitals)", "HMS": "Human Services",
+    "IFA": "International, Foreign Affairs", "PSB": "Public, Societal Benefit",
+    "REL": "Religion Related", "MMB": "Mutual/Membership Benefit",
+    "UNI": "Universities", "HOS": "Hospitals", "ENV": "Environment and Animals"}
+sd = call({"tax_years": [2019], "forms": ["990"],
+           "columns": ["ein", "nteev2_subsector", "nteev2_subsector_definition"],
+           "filters": {"geo_state_abbr": ["RI"]}})
+if check("subsector_def: 200", sd.get("statusCode") == 200, str(sd)[:200]):
+    sdb = body(sd); JIDS.append(sdb["job_id"]); rows = rows_of(sdb["job_id"]); h = rows[0]
+    ci, di = h.index("nteev2_subsector"), h.index("nteev2_subsector_definition")
+    check("subsector_def: every row's label matches the canonical map, null-free",
+          all(r[di] == SUBSECTOR_DEF.get(r[ci], "Other") for r in rows[1:]))
+
 # 5) estimate: no materialization
 e = body(call({"tax_years": [2019], "forms": ["990"], "columns": ["ein"],
                "filters": {"geo_state_abbr": ["RI"]}, "estimate": True}))

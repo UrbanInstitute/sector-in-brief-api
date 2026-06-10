@@ -5,7 +5,8 @@ os.environ.setdefault("RESULTS_BUCKET", "test-bucket")  # query.py reads this at
 import pytest
 from query.query import (_validate, _build_sql, _dictionary_sql, _core_parquets,
                          _sql_list, _double_count_note, _region_case, _expand_region_filter,
-                         _org_type_case, DERIVED_COLUMNS, CENSUS_REGION, BadRequest)
+                         _org_type_case, _subsector_def_case, SUBSECTOR_DEFINITION,
+                         DERIVED_COLUMNS, CENSUS_REGION, BadRequest)
 
 # fake column->source map (core wins overlaps): ein/total_revenue core; the rest bmf
 SRC = {"ein": "c", "total_revenue": "c",
@@ -118,3 +119,16 @@ def test_org_type_is_derived_and_mirrors_producer_case():
     assert sql.index("= 3 AND") < sql.index("BETWEEN 1 AND 29")   # c(3) handled before the range
     assert "'501(c)(d)'" in sql and "'501(c)(k)'" in sql
     assert sql.rstrip().endswith("ELSE '501(c)(3) Public Charities' END")
+
+
+def test_subsector_definition_is_derived_and_canonical():
+    assert "nteev2_subsector_definition" in DERIVED_COLUMNS     # selectable + in the dictionary
+    assert len(SUBSECTOR_DEFINITION) == 11                      # 11 named + 'Other' = 12 labels
+    sql = _subsector_def_case()
+    assert sql.startswith("CASE b.nteev2_subsector ")
+    # dashboard-canonical labels that deliberately DIFFER from bmf's raw column
+    assert "WHEN 'EDU' THEN 'Education (minus Universities)'" in sql
+    assert "WHEN 'HEL' THEN 'Health (minus Hospitals)'" in sql
+    # UNU has no WHEN -> folds into the 'Other' catch-all (keeps it null-free)
+    assert "'UNU'" not in sql
+    assert sql.rstrip().endswith("ELSE 'Other' END")

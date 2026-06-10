@@ -38,6 +38,27 @@ CENSUS_REGION = {  # exact mirror of derive_census_region()
               "TN", "AR", "LA", "OK", "TX"],
     "West": ["AZ", "CO", "ID", "MT", "NV", "NM", "UT", "WY", "AK", "CA", "HI", "OR", "WA"],
 }
+# Dashboard-canonical NTEEv2 subsector labels (mirror of sector-in-brief-data
+# R/table_builder_subsector.R). DELIBERATELY differs from the raw
+# nteev2_subsector_definition already in bmf: EDU/HEL are "(minus Universities/
+# Hospitals)" and UNU/unmapped/NULL fold into "Other" (the bmf column says
+# "Education"/"Health"/"Unknown, Unclassified" and has NULLs) — so the API
+# OVERRIDES the bmf column with this map. 11 named codes + the "Other" catch-all
+# = the 12 labels the dashboard validates against.
+SUBSECTOR_DEFINITION = {
+    "ART": "Arts, Culture, and Humanities",
+    "EDU": "Education (minus Universities)",
+    "HEL": "Health (minus Hospitals)",
+    "HMS": "Human Services",
+    "IFA": "International, Foreign Affairs",
+    "PSB": "Public, Societal Benefit",
+    "REL": "Religion Related",
+    "MMB": "Mutual/Membership Benefit",
+    "UNI": "Universities",
+    "HOS": "Hospitals",
+    "ENV": "Environment and Animals",
+}
+SUBSECTOR_DEFINITION_OTHER = "Other"   # UNU + any code not in the table + NULL
 # Columns the crosswalk joins add (not in core/bmf dicts) -> static dictionary entries.
 DERIVED_COLUMNS = {
     "geo_county_fips": ("Canonical county GEOID (5-char FIPS); filter by this, not name. "
@@ -52,6 +73,11 @@ DERIVED_COLUMNS = {
     "org_type": ("IRS 501(c) subsection classification; 501(c)(3) split into Public Charities "
                  "vs Private Foundations (mirrors sector-in-brief-data derive_organization_type).",
                  "character"),
+    "nteev2_subsector_definition": (
+        "Plain-English NTEEv2 subsector label (mirrors sector-in-brief-data "
+        "table_builder_subsector.R). OVERRIDES the raw bmf column of the same name: "
+        "EDU is 'Education (minus Universities)', HEL 'Health (minus Hospitals)', and "
+        "UNU/unmapped/NULL all fold into 'Other' (so it is null-free).", "character"),
 }
 RESULTS_BUCKET = os.environ["RESULTS_BUCKET"]
 URL_TTL = int(os.environ.get("URL_TTL_SECONDS", "3600"))   # <= object lifetime (30d)
@@ -120,12 +146,25 @@ def _org_type_case():
     )
 
 
+def _subsector_def_case():
+    """Map nteev2_subsector code -> the dashboard's canonical label
+    (sector-in-brief-data R/table_builder_subsector.R). OVERRIDES the raw
+    nteev2_subsector_definition already in bmf (whose EDU/HEL/UNU labels differ
+    and which has NULLs); here UNU/unmapped/NULL all fold into 'Other', so the
+    output is null-free and its distinct values are exactly the 12 labels."""
+    whens = " ".join(f"WHEN {code!r} THEN {label!r}"
+                     for code, label in SUBSECTOR_DEFINITION.items())
+    return f"CASE b.nteev2_subsector {whens} ELSE {SUBSECTOR_DEFINITION_OTHER!r} END"
+
+
 def _bmf_source():
     """bmf-master-geocoded enriched with the crosswalk-derived geo columns. Aliased `b`.
     Mirrors sector-in-brief-data/R/read_bmf.R: county-label join (ambiguous->NULL),
-    CT override by %.2f coordinate, CBSA on the coalesced FIPS, region from state."""
+    CT override by %.2f coordinate, CBSA on the coalesced FIPS, region from state.
+    REPLACE overrides bmf's raw nteev2_subsector_definition with the dashboard-
+    canonical label (the column name pre-exists, so it's replaced, not appended)."""
     return f"""(
-      SELECT b.*,
+      SELECT b.* REPLACE ({_subsector_def_case()} AS nteev2_subsector_definition),
         COALESCE(cf.geo_county_fips, ct.geo_county_fips)             AS geo_county_fips,
         COALESCE(cf.geo_county_canonical, ct.geo_county_canonical)   AS geo_county_canonical,
         cb.cbsa_code, cb.cbsa_title, cb.cbsa_type, cb.csa_code, cb.csa_title,

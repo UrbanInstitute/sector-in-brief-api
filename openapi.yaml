@@ -121,9 +121,13 @@ components:
             `census_region`; and `org_type` (IRS 501(c) subsection classification,
             with 501(c)(3) split into Public Charities vs Private Foundations —
             this is the dashboard's Organization Type filter, NOT `nteev2_org_type`,
-            a separate NTEE-V2 dimension). Validated against the live schema
-            allowlist; `ein` always included.
-          example: [ein, org_name_display, org_type, geo_state_abbr, geo_county_fips, census_region, nteev2_subsector, total_revenue]
+            a separate NTEE-V2 dimension); and `nteev2_subsector_definition`
+            (plain-English subsector label; mirrors table_builder_subsector.R and
+            OVERRIDES bmf's raw same-named column — EDU/HEL become
+            "(minus Universities/Hospitals)" and UNU/NULL fold into "Other", so it
+            is null-free). Validated against the live schema allowlist;
+            `ein` always included.
+          example: [ein, org_name_display, org_type, geo_state_abbr, geo_county_fips, census_region, nteev2_subsector, nteev2_subsector_definition, total_revenue]
         filters:
           type: object
           additionalProperties:
