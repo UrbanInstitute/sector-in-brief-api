@@ -41,11 +41,51 @@ confirm the merged dictionary.
 
 ## Test — the Function URL itself (as the dashboard will call it)
 `AuthType: AWS_IAM` means callers sign SigV4. From the server side the dashboard
-signs with its role; to smoke-test from a shell, use `awscurl` or
-`curl --aws-sigv4`. The URL:
+signs as a dedicated IAM user (see *Dashboard caller credentials* below); to
+smoke-test from a shell, use `awscurl` or `curl --aws-sigv4`. The URL:
 ```
 aws cloudformation describe-stacks --stack-name sector-in-brief-api-stg --query "Stacks[0].Outputs" --output table --profile thiya --region us-east-1
 ```
+
+## Dashboard caller credentials (how the dashboard signs POST /data)
+`POST /data` is `AuthType: AWS_IAM`, so the caller — the `sector-in-brief` Shiny
+server — must sign with an AWS identity allowed to invoke the query function.
+
+shinyapps.io has **no instance role and no OIDC**, and the dashboard invokes the
+function at **runtime** (when a user submits the form), not in CI — so a role is
+not an option there. In particular, do **not** try to reuse the
+`sector-in-brief-api-github-deploy` role: it is a GitHub-Actions OIDC role
+(`sts:AssumeRoleWithWebIdentity`, trusts `token.actions.githubusercontent.com`
+scoped to this repo) and can only be assumed inside a CI run.
+
+Instead, create one dedicated, minimally-scoped **IAM user** with a long-lived
+access key (account `672001523455`):
+```
+aws iam create-user --user-name sector-in-brief-dashboard-invoke --profile thiya
+```
+```
+aws iam put-user-policy --user-name sector-in-brief-dashboard-invoke \
+  --policy-name invoke-query \
+  --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"lambda:InvokeFunction","Resource":["arn:aws:lambda:us-east-1:672001523455:function:sector-in-brief-api-query-stg","arn:aws:lambda:us-east-1:672001523455:function:sector-in-brief-api-query-prod"]}]}' \
+  --profile thiya
+```
+```
+aws iam create-access-key --user-name sector-in-brief-dashboard-invoke --profile thiya
+```
+The policy grants only `lambda:InvokeFunction` on the query function ARNs (stg +
+prod; prod doesn't exist yet, which is harmless). The `create-access-key` output's
+`SecretAccessKey` is shown **once** — capture it.
+
+Hand the key to the dashboard, never commit it: in the `sector-in-brief` repo set
+GitHub Actions secrets `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`; that repo's
+deploy workflows forward them to shinyapps.io as encrypted env vars (rsconnect
+`envVars`), where `paws.compute` reads them from the standard credential chain.
+Region is `us-east-1`.
+
+Rotate without downtime: `create-access-key` (a second key) → update the GitHub
+secret → redeploy → `delete-access-key` (the old one). This account is separate
+from the institutional `nccsdata` account, so its 24h access-key rotation policy
+(the reason the S3 data sync is anonymous) does not apply here.
 
 ## Not in slice 1 (later slices)
 Durable `/download/{job_id}` + request registry, default-on email receipt,
