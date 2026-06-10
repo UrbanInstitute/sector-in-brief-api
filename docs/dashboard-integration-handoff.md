@@ -11,7 +11,8 @@ the API design — it's fixed; build the form against its contract.
 - `../sector-in-brief-api/openapi.yaml` — the interface contract (request/response).
 - `../sector-in-brief-api/docs/deploy.md`, `phase0/FINDINGS.md` — what was built/why.
 - This repo: the current download form (per project notes, **`R/query_builder_download.R`**)
-  and the viz panels (which read S3 directly — leave them alone, see below).
+  and the viz panels (fed by `sector-in-brief-data`'s pre-built artifacts — leave
+  them alone, see below).
 - ADR 0026 (esp. §6) and ADR 0011 in `../nccs-contracts/decisions/`.
 
 ## The API surface you integrate with
@@ -59,6 +60,12 @@ Two endpoints, **different auth** (this is the key design point):
   `derive_organization_type()`), so no compound subsection+foundation predicate on the
   dashboard side. Canonical values: `501(c)(3) Public Charities`, `501(c)(3) Private
   Foundations`, `501(c)(N)` for N in 1–29 (e.g. `501(c)(4)`), and `501(c)(d|e|f|k)`.
+- **Subsector label → `nteev2_subsector_definition`** (selectable; pairs with the
+  `nteev2_subsector` 3-letter code as its plain-English label). API-derived to the
+  dashboard's canonical `table_builder_subsector.R` labels — it **overrides** bmf's
+  raw same-named column, so EDU is `Education (minus Universities)`, HEL `Health
+  (minus Hospitals)`, and UNU/unmapped/NULL fold into `Other` (null-free; exactly 12
+  distinct labels). Add it to the default column set alongside `nteev2_subsector`.
 
 ### Response
 `{ job_id, row_count, result:{format,bytes,url,expires_in_seconds},
@@ -86,7 +93,7 @@ is the durable public one.
 |---|---|---|
 | `CENSUS_STATE_ABBR` | `geo_state_abbr` | ✅ supported |
 | Organization Type | `org_type` (IRS 501(c) subsection; 501(c)(3) split into Public Charities / Private Foundations) | ✅ supported — derived, mirrors producer. **NOT** `nteev2_org_type` (a separate NTEE-V2 dimension; still available but not the org-type filter) |
-| `SUBSECTOR` | `nteev2_subsector` | ✅ supported |
+| `SUBSECTOR` | `nteev2_subsector` (code) + `nteev2_subsector_definition` (canonical label) | ✅ supported — label is API-derived, overrides bmf's raw column (EDU/HEL "minus", UNU→Other) |
 | `TAX_YEAR` | `tax_years` (partition selector, not a filter) | ✅ supported |
 | `CENSUS_COUNTY` | `geo_county_fips` (canonical; filter by FIPS, not name) + `geo_county_canonical` | ✅ supported (slice 5) |
 | `CENSUS_CBSA` | `cbsa_code` / `cbsa_title` (+ `csa_*`) | ✅ supported (slice 5) |
