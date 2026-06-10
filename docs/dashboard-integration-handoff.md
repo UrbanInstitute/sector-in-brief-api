@@ -102,9 +102,12 @@ name** (the FIPS is the stable key; raw names collide). Asset-size was deferred 
 product — not in the API; revisit if the form needs it.
 
 ## Don't break the viz panels
-The dashboard is a **hybrid consumer** (ADR 0011): visualization panels read S3
-**directly** and must keep doing so. Only the **download section** changes to call
-this API. Don't reroute the viz reads.
+The visualization panels are fed by **`sector-in-brief-data`'s pre-built output
+artifacts** — aggregated parquet (`number_nonprofits`, `finances`, `daf`,
+`pf_grants`, …) synced from `s3://nccsdata/sector-in-brief/<vintage>/` into `data/`
+at app startup (ADR 0011, `R/s3_sync.R`). They do **not** read the raw `nccsdata`
+core/BMF that this API queries. Only the **download section** changes to call this
+API; leave the viz data-sync path alone.
 
 ## Known bug to fix at cutover
 The download form has a wiring bug — `filters[["ASSET_SIZE"]] <- inputs$asset_select`
