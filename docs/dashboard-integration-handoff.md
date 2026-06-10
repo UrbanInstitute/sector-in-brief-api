@@ -41,7 +41,7 @@ Two endpoints, **different auth** (this is the key design point):
   "tax_years": [2019, 2020],
   "forms": ["990", "990ez", "990pf", "990combined"],
   "columns": ["ein", "org_name_display", "geo_state_abbr", "nteev2", "nteev2_subsector", "total_revenue"],
-  "filters": { "geo_state_abbr": ["CA", "NY"], "nteev2_org_type": ["..."] },
+  "filters": { "geo_state_abbr": ["CA", "NY"], "org_type": ["501(c)(3) Public Charities", "501(c)(3) Private Foundations"] },
   "format": "csv",
   "email": "user@example.org"
 }
@@ -51,6 +51,14 @@ Two endpoints, **different auth** (this is the key design point):
   data engineering was overhauled; the legacy API reads stale datasets. Send the
   new names; the API validates them against the live schema and 400s on unknowns.
 - `filters` values are `WHERE col IN (...)`. `email` triggers a default-on receipt.
+- **Organization Type → `org_type`** (selectable *and* filterable as of the API's
+  `org_type` slice). This is the IRS 501(c)-subsection taxonomy with 501(c)(3) split
+  into Public Charities vs Private Foundations — the dashboard's existing Org-Type
+  filter maps here, **not** to `nteev2_org_type` (a separate NTEE-V2 dimension that
+  cannot reconstruct the PC/PF split). It's API-derived (mirrors `sector-in-brief-data`
+  `derive_organization_type()`), so no compound subsection+foundation predicate on the
+  dashboard side. Canonical values: `501(c)(3) Public Charities`, `501(c)(3) Private
+  Foundations`, `501(c)(N)` for N in 1–29 (e.g. `501(c)(4)`), and `501(c)(d|e|f|k)`.
 
 ### Response
 `{ job_id, row_count, result:{format,bytes,url,expires_in_seconds},
