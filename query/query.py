@@ -184,12 +184,14 @@ def _bmf_source():
 
 def _column_sources(con, core_paths):
     """Map every queryable column to its alias: 'c' (core) wins overlaps, else 'b'
-    (enriched bmf, incl. the crosswalk-derived geo columns)."""
-    core_cols = [r[0] for r in con.execute(
-        f"DESCRIBE SELECT * FROM read_parquet({_sql_list(core_paths)}, union_by_name=true)").fetchall()]
+    (enriched bmf, incl. the crosswalk-derived geo columns). With no core_paths
+    (source='bmf' — the org-level registry alone) the map is bmf-only."""
     bmf_cols = [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {_bmf_source()} b").fetchall()]
     src = {c: "b" for c in bmf_cols}
-    src.update({c: "c" for c in core_cols})   # core wins on overlap (e.g. ein)
+    if core_paths:
+        core_cols = [r[0] for r in con.execute(
+            f"DESCRIBE SELECT * FROM read_parquet({_sql_list(core_paths)}, union_by_name=true)").fetchall()]
+        src.update({c: "c" for c in core_cols})   # core wins on overlap (e.g. ein)
     return src
 
 
@@ -203,13 +205,16 @@ def _parse_body(event):
     return event or {}                                        # direct invoke (tests)
 
 
-def _validate(req, src):
-    years = req.get("tax_years")
-    if not isinstance(years, list) or not years:
-        raise BadRequest("tax_years must be a non-empty list of years")
-    forms = req.get("forms", ALL_FORMS)
-    if not all(f in ALL_FORMS for f in forms):
-        raise BadRequest(f"forms must be a subset of {ALL_FORMS}")
+def _validate(req, src, mode="core"):
+    if mode == "core":
+        years = req.get("tax_years")
+        if not isinstance(years, list) or not years:
+            raise BadRequest("tax_years must be a non-empty list of years")
+        forms = req.get("forms", ALL_FORMS)
+        if not all(f in ALL_FORMS for f in forms):
+            raise BadRequest(f"forms must be a subset of {ALL_FORMS}")
+    else:                              # source='bmf' — org-level registry, no tax-year partition / forms
+        years, forms = [], []
     cols = list(dict.fromkeys(req.get("columns") or []))
     if not cols:
         raise BadRequest("columns must be a non-empty list")
@@ -225,19 +230,23 @@ def _validate(req, src):
     return years, forms, cols, filters, fmt
 
 
-def _build_sql(cols, filters, src, core_paths):
+def _build_sql(cols, filters, src, core_paths, active_years=None):
     select = ", ".join(f'{src[c]}."{c}" AS "{c}"' for c in cols)
-    where, params = "", []
-    if filters:
-        clauses = []
-        for k, vals in filters.items():
-            vals = vals if isinstance(vals, list) else [vals]
-            clauses.append(f'{src[k]}."{k}" IN ({", ".join(["?"] * len(vals))})')
-            params += [str(v) for v in vals]
-        where = "WHERE " + " AND ".join(clauses)
-    sql = (f"SELECT {select} "
-           f"FROM read_parquet({_sql_list(core_paths)}, union_by_name=true) c "
-           f'JOIN {_bmf_source()} b ON c."ein" = b."ein" {where}')
+    clauses, params = [], []
+    for k, vals in (filters or {}).items():
+        vals = vals if isinstance(vals, list) else [vals]
+        clauses.append(f'{src[k]}."{k}" IN ({", ".join(["?"] * len(vals))})')
+        params += [str(v) for v in vals]
+    if active_years:   # BMF year filter: org lifespan [first,last] OVERLAPS [min,max] of the span (see _plan)
+        clauses.append('b."first_year_in_bmf" <= ? AND b."last_year_in_bmf" >= ?')
+        params += [max(active_years), min(active_years)]
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    if core_paths:
+        sql = (f"SELECT {select} "
+               f"FROM read_parquet({_sql_list(core_paths)}, union_by_name=true) c "
+               f'JOIN {_bmf_source()} b ON c."ein" = b."ein" {where}')
+    else:              # source='bmf': the org-level registry alone, no core join
+        sql = f"SELECT {select} FROM {_bmf_source()} b {where}"
     return sql, params
 
 
@@ -288,27 +297,52 @@ def _expand_region_filter(filters):
     return out
 
 
+def _validate_active_years(req):
+    """BMF year filtering (source='bmf'). The org-level registry has no per-year
+    partition; each row carries a lifespan [first_year_in_bmf, last_year_in_bmf].
+    `active_years` selects orgs whose lifespan OVERLAPS the requested span — NOT an
+    `IN` on a single year column (which would mean "org's first/last year == Y", a
+    ~19x-smaller, wrong set). `tax_years` is a CORE partition concept and is rejected
+    here so the two never get silently conflated. Returns the list, or None."""
+    if "tax_years" in req:
+        raise BadRequest("tax_years applies to source='core'; use active_years for BMF lifespan filtering")
+    ys = req.get("active_years")
+    if ys is None:
+        return None
+    if not isinstance(ys, list) or not ys or not all(isinstance(y, int) for y in ys):
+        raise BadRequest("active_years must be a non-empty list of integer years")
+    return ys
+
+
 def _plan(con, req):
-    years = req.get("tax_years") or []
-    forms = req.get("forms", ALL_FORMS)
-    if not isinstance(years, list) or not years:
-        raise BadRequest("tax_years must be a non-empty list of years")
-    if not all(f in ALL_FORMS for f in forms):
-        raise BadRequest(f"forms must be a subset of {ALL_FORMS}")
-    core_paths = _core_parquets(years, forms)
+    mode = req.get("source", "core")
+    if mode not in ("core", "bmf"):
+        raise BadRequest("source must be 'core' or 'bmf'")
+    if mode == "core":
+        years = req.get("tax_years") or []
+        forms = req.get("forms", ALL_FORMS)
+        if not isinstance(years, list) or not years:
+            raise BadRequest("tax_years must be a non-empty list of years")
+        if not all(f in ALL_FORMS for f in forms):
+            raise BadRequest(f"forms must be a subset of {ALL_FORMS}")
+        core_paths, active_years = _core_parquets(years, forms), None
+    else:                              # source='bmf': org-level registry, no core join
+        core_paths, active_years = [], _validate_active_years(req)
     src = _column_sources(con, core_paths)
-    years, forms, cols, filters, fmt = _validate(req, src)
+    years, forms, cols, filters, fmt = _validate(req, src, mode)
     filters = _expand_region_filter(filters)   # region -> states, so it pushes down (slice 5.1)
-    return dict(years=years, forms=forms, cols=cols, filters=filters, fmt=fmt, src=src, core_paths=core_paths)
+    return dict(mode=mode, years=years, forms=forms, cols=cols, filters=filters, fmt=fmt,
+                src=src, core_paths=core_paths, active_years=active_years)
 
 
 def _materialize(con, plan, job_id, s3):
-    sql, params = _build_sql(plan["cols"], plan["filters"], plan["src"], plan["core_paths"])
+    sql, params = _build_sql(plan["cols"], plan["filters"], plan["src"], plan["core_paths"], plan["active_years"])
     fmt = plan["fmt"]
     result_key = f"results/{job_id}.{EXT[fmt]}"
     rows = con.execute(f"SELECT count(*) FROM ({sql})", params).fetchone()[0]
     con.execute(f"COPY ({sql}) TO 's3://{RESULTS_BUCKET}/{result_key}' (FORMAT {fmt}, HEADER);", params)
-    dsql, dparams = _dictionary_sql(plan["cols"], plan["src"], _core_dicts(plan["years"], plan["forms"]))
+    core_dicts = _core_dicts(plan["years"], plan["forms"]) if plan["core_paths"] else []
+    dsql, dparams = _dictionary_sql(plan["cols"], plan["src"], core_dicts)
     dict_key = f"results/{job_id}_dictionary.csv"
     con.execute(f"COPY ({dsql}) TO 's3://{RESULTS_BUCKET}/{dict_key}' (FORMAT csv, HEADER);", dparams)
     size = s3.head_object(Bucket=RESULTS_BUCKET, Key=result_key)["ContentLength"]
@@ -375,9 +409,13 @@ def _send_receipt(email, info):
         return "skipped:no_sender"
     flt = info["filters"]
     flt_str = "; ".join(f"{k}: {', '.join(map(str, v))}" for k, v in flt.items()) if flt else "none"
-    summary = [("Rows", f"{info['row_count']:,}"), ("Format", info["format"].upper()),
-               ("Tax years", ", ".join(map(str, info["tax_years"]))),
-               ("Form types", ", ".join(info["forms"])),
+    if info.get("source") == "bmf":
+        scope = [("Source", "BMF (organization registry)"),
+                 ("Active years", ", ".join(map(str, info.get("active_years") or [])) or "all")]
+    else:
+        scope = [("Tax years", ", ".join(map(str, info["tax_years"]))),
+                 ("Form types", ", ".join(info["forms"]))]
+    summary = [("Rows", f"{info['row_count']:,}"), ("Format", info["format"].upper()), *scope,
                ("Columns", ", ".join(info["columns"])), ("Filters", flt_str),
                ("Reference ID", info["job_id"])]
     caveat = _double_count_note(info["forms"])
@@ -418,7 +456,7 @@ def _send_receipt(email, info):
 def _estimate(con, plan):
     """ADR 0026 §6 size pre-check: exact row_count + sampled byte estimate, no
     materialization / S3 write / email. The dashboard gates the export UX on this."""
-    sql, params = _build_sql(plan["cols"], plan["filters"], plan["src"], plan["core_paths"])
+    sql, params = _build_sql(plan["cols"], plan["filters"], plan["src"], plan["core_paths"], plan["active_years"])
     rows = con.execute(f"SELECT count(*) FROM ({sql})", params).fetchone()[0]
     est_bytes = 0
     if rows:
@@ -441,7 +479,8 @@ def _create_export(event, s3):
     email = req.get("email")
     _log_event(s3, "request_created", {
         "job_id": job_id, "requester": _hash_requester(email),
-        "tax_years": plan["years"], "forms": plan["forms"],
+        "source": plan["mode"], "tax_years": plan["years"], "forms": plan["forms"],
+        "active_years": plan["active_years"],
         "n_columns": len(plan["cols"]), "n_filters": len(plan["filters"]), "format": plan["fmt"]})
     t0 = time.monotonic()
     try:
@@ -455,7 +494,8 @@ def _create_export(event, s3):
                 "bytes": m["bytes"], "duration_ms": int((time.monotonic() - t0) * 1000)})
     registry = {
         "job_id": job_id,
-        "request": {"tax_years": plan["years"], "forms": plan["forms"],
+        "request": {"source": plan["mode"], "tax_years": plan["years"], "forms": plan["forms"],
+                    "active_years": plan["active_years"],
                     "columns": plan["cols"], "filters": plan["filters"], "format": plan["fmt"]},
         "email": email,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -468,7 +508,8 @@ def _create_export(event, s3):
     dict_url = f"{data_url}?kind=dictionary"
     receipt = _send_receipt(email, {
         "data_url": data_url, "dict_url": dict_url, "row_count": m["row_count"],
-        "format": m["format"], "tax_years": plan["years"], "forms": plan["forms"],
+        "format": m["format"], "source": plan["mode"], "tax_years": plan["years"],
+        "forms": plan["forms"], "active_years": plan["active_years"],
         "columns": plan["cols"], "filters": plan["filters"], "job_id": job_id}) if email else None
     return _resp(200, {
         "job_id": job_id,
