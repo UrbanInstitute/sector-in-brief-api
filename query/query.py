@@ -84,6 +84,15 @@ URL_TTL = int(os.environ.get("URL_TTL_SECONDS", "3600"))   # <= object lifetime 
 SENDER_EMAIL = os.environ.get("SENDER_EMAIL")              # verified SES sender; receipt is sent if set
 DOWNLOAD_BASE_URL = os.environ.get("DOWNLOAD_BASE_URL", "")  # public /download Function URL (for the email link)
 DOWNLOAD_ONLY = bool(os.environ.get("DOWNLOAD_ONLY"))     # public download function: refuse /data
+# ADR 0030: giant exports (> threshold) route to a Fargate worker instead of
+# materializing synchronously on Lambda (10 GB join-memory cap). ECS_CLUSTER unset
+# => async disabled (everything runs sync), so the API degrades safely pre-deploy.
+ASYNC_THRESHOLD_BYTES = int(os.environ.get("ASYNC_THRESHOLD_BYTES", str(8 * 1024**3)))
+ECS_CLUSTER = os.environ.get("ECS_CLUSTER", "")
+ECS_TASK_DEF = os.environ.get("ECS_TASK_DEF", "")
+ECS_CONTAINER = os.environ.get("ECS_CONTAINER", "worker")
+ECS_SUBNETS = [s for s in os.environ.get("ECS_SUBNETS", "").split(",") if s]
+ECS_SECURITY_GROUP = os.environ.get("ECS_SECURITY_GROUP", "")
 ALL_FORMS = ["990", "990ez", "990pf", "990combined"]
 EXT = {"csv": "csv", "parquet": "parquet"}
 JOB_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -483,9 +492,10 @@ def _send_receipt(email, info):
 
 
 # ---- routes ------------------------------------------------------------------
-def _estimate(con, plan):
-    """ADR 0026 §6 size pre-check: exact row_count + sampled byte estimate, no
-    materialization / S3 write / email. The dashboard gates the export UX on this."""
+def _estimate_size(con, plan):
+    """Exact row_count + sampled byte estimate (count + 5k-row sample), no S3
+    write / email. Shared by the /data estimate pre-check and the ADR 0030 async
+    router. Returns (rows, est_bytes)."""
     sql, params = _build_sql(plan["cols"], plan["filters"], plan["src"], plan["core_paths"], plan["active_years"])
     rows = con.execute(f"SELECT count(*) FROM ({sql})", params).fetchone()[0]
     est_bytes = 0
@@ -495,8 +505,57 @@ def _estimate(con, plan):
         n = min(5000, rows)
         est_bytes = int(os.path.getsize(sample) / n * rows)
         os.remove(sample)
+    return rows, est_bytes
+
+
+def _estimate(con, plan):
+    """ADR 0026 §6 size pre-check: the dashboard gates the export UX on this."""
+    rows, est_bytes = _estimate_size(con, plan)
     return _resp(200, {"estimate": True, "row_count": rows,
                        "columns": len(plan["cols"]), "estimated_bytes": est_bytes})
+
+
+def _needs_estimate_for_routing(filters):
+    """ADR 0030 routing gate (pure). A state/region-bounded request is safely far
+    under the async threshold (largest: CA all-years/forms ~16 MB), so it skips the
+    estimate and stays on the fast sync path. Only geographically-broad requests —
+    the only ones that can reach the 30-51 GB giant tail — pay a count to be sized.
+    (census_region is expanded to geo_state_abbr in _plan, so it counts as bounded.)"""
+    return "geo_state_abbr" not in (filters or {})
+
+
+def _registry(plan, job_id, email, status, result_key=None):
+    """The requests/{job_id}.json sidecar (ADR 0026 §2). `status` (ADR 0030):
+    'ready' for a sync export, 'pending'->'ready'/'failed' for an async one."""
+    return {
+        "job_id": job_id,
+        "request": {"source": plan["mode"], "tax_years": plan["years"], "forms": plan["forms"],
+                    "active_years": plan["active_years"],
+                    "columns": plan["cols"], "filters": plan["filters"], "format": plan["fmt"]},
+        "email": email,
+        "status": status,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "result_key": result_key,
+    }
+
+
+def _durable_urls(job_id):
+    base = DOWNLOAD_BASE_URL.rstrip("/")
+    data_url = f"{base}/download/{job_id}" if base else f"/download/{job_id}"
+    return base, data_url, f"{data_url}?kind=dictionary"
+
+
+def _send_receipt_for(plan, job_id, email, m):
+    """Default-on receipt (ADR 0026 §3). Sent by the request on the sync path and
+    by the worker on the async path — same durable link either way."""
+    if not email:
+        return None
+    _, data_url, dict_url = _durable_urls(job_id)
+    return _send_receipt(email, {
+        "data_url": data_url, "dict_url": dict_url, "row_count": m["row_count"],
+        "format": m["format"], "source": plan["mode"], "tax_years": plan["years"],
+        "forms": plan["forms"], "active_years": plan["active_years"],
+        "columns": plan["cols"], "filters": plan["filters"], "job_id": job_id})
 
 
 def _create_export(event, s3):
@@ -514,6 +573,13 @@ def _create_export(event, s3):
         "source": plan["mode"], "tax_years": plan["years"], "forms": plan["forms"],
         "active_years": plan["active_years"],
         "n_columns": len(plan["cols"]), "n_filters": len(plan["filters"]), "format": plan["fmt"]})
+    # ADR 0030: size a geographically-broad request and route a giant (> threshold,
+    # over Lambda's 10 GB cap) to the Fargate worker. State/region-bounded requests
+    # skip the estimate and stay synchronous.
+    if ECS_CLUSTER and _needs_estimate_for_routing(plan["filters"]):
+        _, est_bytes = _estimate_size(con, plan)
+        if est_bytes > ASYNC_THRESHOLD_BYTES:
+            return _dispatch_async(plan, job_id, email, est_bytes, s3)
     t0 = time.monotonic()
     try:
         m = _materialize(con, plan, job_id, s3)
@@ -529,25 +595,11 @@ def _create_export(event, s3):
                {"job_id": job_id, "success": True, "row_count": m["row_count"],
                 "bytes": m["bytes"], "duration_ms": timings["total_materialize_ms"],
                 "timings": timings})
-    registry = {
-        "job_id": job_id,
-        "request": {"source": plan["mode"], "tax_years": plan["years"], "forms": plan["forms"],
-                    "active_years": plan["active_years"],
-                    "columns": plan["cols"], "filters": plan["filters"], "format": plan["fmt"]},
-        "email": email,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "result_key": m["result_key"],
-    }
     s3.put_object(Bucket=RESULTS_BUCKET, Key=f"requests/{job_id}.json",
-                  Body=json.dumps(registry), ContentType="application/json")
-    base = DOWNLOAD_BASE_URL.rstrip("/")
-    data_url = f"{base}/download/{job_id}" if base else f"/download/{job_id}"
-    dict_url = f"{data_url}?kind=dictionary"
-    receipt = _send_receipt(email, {
-        "data_url": data_url, "dict_url": dict_url, "row_count": m["row_count"],
-        "format": m["format"], "source": plan["mode"], "tax_years": plan["years"],
-        "forms": plan["forms"], "active_years": plan["active_years"],
-        "columns": plan["cols"], "filters": plan["filters"], "job_id": job_id}) if email else None
+                  Body=json.dumps(_registry(plan, job_id, email, "ready", m["result_key"])),
+                  ContentType="application/json")
+    base, data_url, dict_url = _durable_urls(job_id)
+    receipt = _send_receipt_for(plan, job_id, email, m)
     return _resp(200, {
         "job_id": job_id,
         "row_count": m["row_count"],
@@ -561,6 +613,61 @@ def _create_export(event, s3):
     })
 
 
+def _dispatch_async(plan, job_id, email, est_bytes, s3):
+    """ADR 0030: persist a pending registry, launch a one-shot Fargate task to
+    materialize the giant, and return 202 immediately. The worker (run_async_job)
+    flips the registry to ready and sends the receipt when it finishes."""
+    s3.put_object(Bucket=RESULTS_BUCKET, Key=f"requests/{job_id}.json",
+                  Body=json.dumps(_registry(plan, job_id, email, "pending")),
+                  ContentType="application/json")
+    boto3.client("ecs", region_name="us-east-1").run_task(
+        cluster=ECS_CLUSTER, taskDefinition=ECS_TASK_DEF, launchType="FARGATE", count=1,
+        networkConfiguration={"awsvpcConfiguration": {
+            "subnets": ECS_SUBNETS, "securityGroups": [ECS_SECURITY_GROUP],
+            "assignPublicIp": "ENABLED"}},   # default-VPC public subnets: need a public IP to reach S3/ECR/SES
+        overrides={"containerOverrides": [{"name": ECS_CONTAINER,
+                                           "environment": [{"name": "JOB_ID", "value": job_id}]}]})
+    _log_event(s3, "export_dispatched_async", {"job_id": job_id, "estimated_bytes": est_bytes})
+    base, data_url, dict_url = _durable_urls(job_id)
+    return _resp(202, {
+        "job_id": job_id, "status": "pending", "estimated_bytes": est_bytes,
+        "message": ("Large export started; a download link will be emailed when ready."
+                    if email else "Large export started; poll download_path for status."),
+        "download_path": f"/download/{job_id}",
+        "download_url": data_url if base else None,
+        "dictionary_download_url": dict_url if base else None,
+        "email": {"to": email, "status": "pending"} if email else None,
+    })
+
+
+def run_async_job(job_id, s3):
+    """Fargate worker entrypoint (ADR 0030). Materialize a pending giant job, flip
+    the registry to ready/failed, and send the email receipt — reusing the sync
+    path's _materialize so there is exactly one materialization implementation."""
+    key = f"requests/{job_id}.json"
+    reg = json.loads(s3.get_object(Bucket=RESULTS_BUCKET, Key=key)["Body"].read())
+    con = _con()
+    plan = _plan(con, reg["request"])
+    t0 = time.monotonic()
+    try:
+        m = _materialize(con, plan, job_id, s3)
+    except Exception as e:  # noqa: BLE001
+        reg["status"], reg["error"] = "failed", str(e)[:300]
+        s3.put_object(Bucket=RESULTS_BUCKET, Key=key, Body=json.dumps(reg), ContentType="application/json")
+        _log_event(s3, "export_materialized", {"job_id": job_id, "success": False, "async": True,
+                                               "duration_ms": int((time.monotonic() - t0) * 1000)})
+        raise
+    reg["status"], reg["result_key"] = "ready", m["result_key"]
+    s3.put_object(Bucket=RESULTS_BUCKET, Key=key, Body=json.dumps(reg), ContentType="application/json")
+    timings = {**m["timings"], "total_materialize_ms": int((time.monotonic() - t0) * 1000)}
+    print(json.dumps({"phase_timings": timings, "job_id": job_id, "async": True,
+                      "row_count": m["row_count"], "bytes": m["bytes"], "format": m["format"]}))
+    _log_event(s3, "export_materialized",
+               {"job_id": job_id, "success": True, "async": True, "row_count": m["row_count"],
+                "bytes": m["bytes"], "duration_ms": timings["total_materialize_ms"], "timings": timings})
+    _send_receipt_for(plan, job_id, reg.get("email"), m)
+
+
 def _download(job_id, s3, kind="result"):
     if not JOB_RE.match(job_id or ""):
         return _resp(404, {"error": "unknown_job"})
@@ -568,6 +675,12 @@ def _download(job_id, s3, kind="result"):
         registry = json.loads(s3.get_object(Bucket=RESULTS_BUCKET, Key=f"requests/{job_id}.json")["Body"].read())
     except Exception:
         return _resp(404, {"error": "unknown_job"})
+    if registry.get("status") == "pending":          # ADR 0030: async giant still running
+        return _resp(202, {"job_id": job_id, "status": "pending",
+                           "detail": "export is still being prepared; try again shortly"})
+    if registry.get("status") == "failed":
+        return _resp(500, {"job_id": job_id, "status": "failed",
+                           "detail": registry.get("error", "export failed")})
     target_key = (f"results/{job_id}_dictionary.csv" if kind == "dictionary"
                   else registry["result_key"])
     rematerialized = not _exists(s3, target_key)
