@@ -76,6 +76,14 @@ if check("data: 200", r.get("statusCode") == 200, str(r)[:200]):
     check("data: result URL resolves (S3 200)", http_ok(b["result"]["url"]))
     check("data: dictionary URL resolves (S3 200)", http_ok(b["data_dictionary"]["url"]))
 
+# 1b) parquet export (regression: HEADER is CSV-only; parquet COPY must omit it — issue #8)
+p = call({"tax_years": [2019], "forms": ["990"], "columns": ["ein", "total_revenue"],
+          "filters": {"geo_state_abbr": ["RI"]}, "format": "parquet"})
+if check("data(parquet): 200", p.get("statusCode") == 200, str(p)[:200]):
+    pb = body(p); JIDS.append(pb["job_id"])
+    check("data(parquet): result is .parquet", pb["result"]["format"] == "parquet")
+    check("data(parquet): URL resolves (S3 200)", http_ok(pb["result"]["url"]))
+
 # 2) validation
 check("validate: unknown column -> 400", call({"tax_years": [2019], "columns": ["nope"]}).get("statusCode") == 400)
 check("validate: missing tax_years -> 400", call({"columns": ["ein"]}).get("statusCode") == 400)
@@ -181,7 +189,8 @@ if SMOKE_EMAIL:
 
 # ---- cleanup: this run's results/registry + its telemetry events ----
 for jid in JIDS:
-    for k in [f"results/{jid}.csv", f"results/{jid}_dictionary.csv", f"requests/{jid}.json"]:
+    for k in [f"results/{jid}.csv", f"results/{jid}.parquet",
+              f"results/{jid}_dictionary.csv", f"requests/{jid}.json"]:
         try:
             s3.delete_object(Bucket=BUCKET, Key=k)
         except Exception:

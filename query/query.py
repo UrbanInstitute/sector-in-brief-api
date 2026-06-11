@@ -360,15 +360,24 @@ def _materialize(con, plan, job_id, s3):
     sql, params = _build_sql(plan["cols"], plan["filters"], plan["src"], plan["core_paths"], plan["active_years"])
     fmt = plan["fmt"]
     result_key = f"results/{job_id}.{EXT[fmt]}"
-    rows = con.execute(f"SELECT count(*) FROM ({sql})", params).fetchone()[0]
-    con.execute(f"COPY ({sql}) TO 's3://{RESULTS_BUCKET}/{result_key}' (FORMAT {fmt}, HEADER);", params)
+    # HEADER is a CSV-only option; parquet rejects it (NotImplementedException). The
+    # COPY itself returns the rows-written count, so no separate count(*) pass — that
+    # would re-run the whole join (a wasteful 2x on every export).
+    copy_opts = "(FORMAT csv, HEADER)" if fmt == "csv" else "(FORMAT parquet)"
+    timings = {}
+    t = time.monotonic()
+    rows = con.execute(
+        f"COPY ({sql}) TO 's3://{RESULTS_BUCKET}/{result_key}' {copy_opts};", params).fetchone()[0]
+    timings["result_copy_ms"] = int((time.monotonic() - t) * 1000)
+    t = time.monotonic()
     core_dicts = _core_dicts(plan["years"], plan["forms"]) if plan["core_paths"] else []
     dsql, dparams = _dictionary_sql(plan["cols"], plan["src"], core_dicts)
     dict_key = f"results/{job_id}_dictionary.csv"
     con.execute(f"COPY ({dsql}) TO 's3://{RESULTS_BUCKET}/{dict_key}' (FORMAT csv, HEADER);", dparams)
+    timings["dictionary_copy_ms"] = int((time.monotonic() - t) * 1000)
     size = s3.head_object(Bucket=RESULTS_BUCKET, Key=result_key)["ContentLength"]
     return dict(row_count=rows, result_key=result_key, dict_key=dict_key, bytes=size,
-                columns=len(plan["cols"]), format=fmt)
+                columns=len(plan["cols"]), format=fmt, timings=timings)
 
 
 # ---- responses ---------------------------------------------------------------
@@ -492,7 +501,9 @@ def _estimate(con, plan):
 
 def _create_export(event, s3):
     req = _parse_body(event)
-    con = _con()
+    t_con = time.monotonic()
+    con = _con()                             # cold start: httpfs install/load + S3 secret
+    connect_ms = int((time.monotonic() - t_con) * 1000)
     plan = _plan(con, req)
     if req.get("estimate"):                  # size pre-check only — return early
         return _estimate(con, plan)
@@ -510,9 +521,14 @@ def _create_export(event, s3):
         _log_event(s3, "export_materialized",
                    {"job_id": job_id, "success": False, "duration_ms": int((time.monotonic() - t0) * 1000)})
         raise
+    timings = {"connect_ms": connect_ms, **m["timings"],
+               "total_materialize_ms": int((time.monotonic() - t0) * 1000)}
+    print(json.dumps({"phase_timings": timings, "job_id": job_id,
+                      "row_count": m["row_count"], "bytes": m["bytes"], "format": m["format"]}))
     _log_event(s3, "export_materialized",
                {"job_id": job_id, "success": True, "row_count": m["row_count"],
-                "bytes": m["bytes"], "duration_ms": int((time.monotonic() - t0) * 1000)})
+                "bytes": m["bytes"], "duration_ms": timings["total_materialize_ms"],
+                "timings": timings})
     registry = {
         "job_id": job_id,
         "request": {"source": plan["mode"], "tax_years": plan["years"], "forms": plan["forms"],
