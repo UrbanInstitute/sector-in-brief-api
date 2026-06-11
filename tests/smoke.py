@@ -143,6 +143,25 @@ if check("subsector_def: 200", sd.get("statusCode") == 200, str(sd)[:200]):
     check("subsector_def: every row's label matches the canonical map, null-free",
           all(r[di] == SUBSECTOR_DEF.get(r[ci], "Other") for r in rows[1:]))
 
+# 4e) BMF mode (source='bmf', ADR 0029): org-level registry, no core join, filtered
+# by active_years lifespan OVERLAP. Assert the forced provenance columns come back AND
+# every row actually satisfies the overlap predicate (self-auditing result).
+SPAN = [2015, 2018]
+bmf = call({"source": "bmf", "columns": ["ein", "geo_state_abbr"],
+            "active_years": SPAN, "filters": {"geo_state_abbr": ["RI"]}})
+if check("bmf: 200", bmf.get("statusCode") == 200, str(bmf)[:200]):
+    bb = body(bmf); JIDS.append(bb["job_id"])
+    check("bmf: row_count > 0", bb["row_count"] > 0)
+    rows = rows_of(bb["job_id"]); h = rows[0]
+    check("bmf: lifespan provenance columns forced into output",
+          "first_year_in_bmf" in h and "last_year_in_bmf" in h, str(h))
+    fi, li = h.index("first_year_in_bmf"), h.index("last_year_in_bmf")
+    check("bmf: every row's lifespan overlaps the requested span",
+          all(int(r[fi]) <= max(SPAN) and int(r[li]) >= min(SPAN) for r in rows[1:]))
+# tax_years is a CORE concept and must be rejected in BMF mode
+check("bmf: tax_years in bmf mode -> 400",
+      call({"source": "bmf", "columns": ["ein"], "tax_years": [2019]}).get("statusCode") == 400)
+
 # 5) estimate: no materialization
 e = body(call({"tax_years": [2019], "forms": ["990"], "columns": ["ein"],
                "filters": {"geo_state_abbr": ["RI"]}, "estimate": True}))

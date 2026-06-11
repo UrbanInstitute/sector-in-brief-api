@@ -22,6 +22,13 @@ info:
     pre-merged table's column names; the dashboard form is reworked to match
     (ADR 0026 §6).
 
+    Two query modes via `source`: `core` (default) joins CORE tax-year
+    partitions to bmf-master-geocoded on EIN and is filtered by `tax_years`;
+    `bmf` drops the join and selects one row per EIN straight from
+    bmf-master-geocoded (the org registry, incl. non-filers; no financials /
+    tax-year) and is filtered by `active_years` (org-lifespan overlap). See
+    ADR 0029.
+
 servers:
   - url: https://{functionUrlId}.lambda-url.us-east-1.on.aws
     variables:
@@ -83,15 +90,56 @@ components:
   schemas:
     ExportRequest:
       type: object
-      required: [tax_years, columns]
+      required: [columns]
       additionalProperties: false
+      allOf:
+        # source=bmf (default core) rejects tax_years/forms and requires active_years;
+        # source=core requires tax_years and ignores active_years.
+        - if:
+            properties: { source: { const: bmf } }
+            required: [source]
+          then:
+            required: [active_years]
+            not: { anyOf: [ { required: [tax_years] }, { required: [forms] } ] }
+          else:
+            required: [tax_years]
       properties:
+        source:
+          type: string
+          enum: [core, bmf]
+          default: core
+          description: >
+            Query mode (ADR 0029). `core` (default): join the CORE tax-year
+            partitions to bmf-master-geocoded on EIN; filtered by `tax_years`.
+            `bmf`: org-level registry only (one row per EIN from
+            bmf-master-geocoded, incl. non-filers; no financials / tax-year);
+            filtered by `active_years`. `tax_years`/`forms` apply only to
+            `core`; `active_years` applies only to `bmf`.
         tax_years:
           type: array
           minItems: 1
           items: { type: integer, minimum: 1989 }
-          description: Core 990 tax-year partitions to read (selects which parquet files).
+          description: >
+            CORE 990 tax-year partitions to read (selects which parquet files).
+            Required when `source=core`; rejected when `source=bmf` (use
+            `active_years` for the BMF lifespan filter).
           example: [2019, 2020]
+        active_years:
+          type: array
+          minItems: 1
+          items: { type: integer, minimum: 1989 }
+          description: >
+            BMF lifespan filter (`source=bmf` only). Selects orgs whose
+            registry lifespan OVERLAPS the requested span — predicate
+            `first_year_in_bmf <= max(active_years) AND last_year_in_bmf >=
+            min(active_years)`, i.e. "active at any point in the span." This is
+            the active-window rule of the sector-in-brief count, NOT an `IN` on
+            a single lifespan column (which means "first/last year == Y" — a
+            ~19x-smaller, wrong set). Only the span endpoints matter; gaps
+            between them are not listed. When applied, BOTH `first_year_in_bmf`
+            and `last_year_in_bmf` are forced into the output columns (filter
+            provenance — the result self-audits the predicate).
+          example: [2018, 2020]
         forms:
           type: array
           minItems: 1
