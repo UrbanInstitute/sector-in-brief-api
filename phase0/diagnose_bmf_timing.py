@@ -50,9 +50,18 @@ def main():
     timed(con, "+ county join",
           f"{base} LEFT JOIN read_parquet('{CXW_COUNTY}') cf "
           f"ON b.geo_state_abbr = cf.geo_state_abbr AND b.geo_county = cf.geo_county_raw")
-    timed(con, "+ ct join (printf lat/lon)",
+    # OLD single-sided filter (b.geo_state_abbr = 'CT') — fans out, HANGS. Kept
+    # for reference; do not enable on the full registry.
+    timed(con, "+ ct join OLD (single-sided 'CT' filter)",
           f"{base} LEFT JOIN read_parquet('{CXW_CT}') ct "
           f"ON b.geo_state_abbr = 'CT' "
+          f"AND printf('%.2f', b.geo_lat) = printf('%.2f', ct.lat2) "
+          f"AND printf('%.2f', b.geo_lon) = printf('%.2f', ct.lon2)"
+          ) if os.environ.get("RUN_OLD_CT") else print('{"stage": "+ ct join OLD", "skipped": "set RUN_OLD_CT=1 to run (it hangs)"}')
+    # FIXED: 'CT' carried on the ct side -> real two-sided equi-join key.
+    timed(con, "+ ct join FIXED (state-keyed)",
+          f"{base} LEFT JOIN (SELECT *, 'CT' AS _ct_state FROM read_parquet('{CXW_CT}')) ct "
+          f"ON b.geo_state_abbr = ct._ct_state "
           f"AND printf('%.2f', b.geo_lat) = printf('%.2f', ct.lat2) "
           f"AND printf('%.2f', b.geo_lon) = printf('%.2f', ct.lon2)")
     timed(con, "+ cbsa join",
