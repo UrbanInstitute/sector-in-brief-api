@@ -173,8 +173,15 @@ def _bmf_source():
       FROM read_parquet('{BMF}') b
       LEFT JOIN read_parquet('{CXW_COUNTY}') cf
         ON b.geo_state_abbr = cf.geo_state_abbr AND b.geo_county = cf.geo_county_raw
-      LEFT JOIN read_parquet('{CXW_CT}') ct
-        ON b.geo_state_abbr = 'CT'
+      -- CT override applies only to CT-state rows. The 'CT' literal is carried on
+      -- the ct side so `b.geo_state_abbr = ct._ct_state` is a real two-sided equi-
+      -- join KEY, not a single-sided filter. Otherwise DuckDB hash-joins on the
+      -- rounded coords alone and probes all ~3.7M rows: non-CT orgs sharing a 2dp
+      -- coord cell with CT points fan out into the billions before the state filter
+      -- prunes them (unfiltered full-registry hangs). With state in the key, non-CT
+      -- rows miss the hash immediately. Same result, no fan-out.
+      LEFT JOIN (SELECT *, 'CT' AS _ct_state FROM read_parquet('{CXW_CT}')) ct
+        ON b.geo_state_abbr = ct._ct_state
         AND printf('%.2f', b.geo_lat) = printf('%.2f', ct.lat2)
         AND printf('%.2f', b.geo_lon) = printf('%.2f', ct.lon2)
       LEFT JOIN read_parquet('{CXW_CBSA}') cb
