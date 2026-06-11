@@ -12,9 +12,28 @@ Parameters:
     Type: String
     Default: stg
     AllowedValues: [stg, prod]
+  # ADR 0030 async giant-export worker. Fargate needs a VPC + subnets; pass the
+  # default VPC's public subnets (see docs/deploy.md). Leave WorkerVpcId empty to
+  # deploy WITHOUT the async worker — the API then runs everything synchronously
+  # (the handler guards on ECS_CLUSTER), so the stack degrades safely.
+  WorkerVpcId:
+    Type: String
+    Default: ""
+    Description: VPC for the Fargate worker (empty = async disabled).
+  WorkerSubnets:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: Public subnet IDs for the Fargate worker (default-VPC subnets).
+  WorkerCpu:
+    Type: String
+    Default: "8192"          # 8 vCPU
+  WorkerMemory:
+    Type: String
+    Default: "61440"         # 60 GB; DuckDB spills past this to the 200 GB ephemeral volume
 
 Conditions:
   IsProd: !Equals [!Ref Stage, prod]
+  AsyncEnabled: !Not [!Equals [!Ref WorkerVpcId, ""]]
 
 Globals:
   Function:
@@ -54,6 +73,13 @@ Resources:
           SENDER_EMAIL: tpoongundranar@urban.org          # verified SES sender (urban.org domain)
           DOWNLOAD_BASE_URL: !GetAtt DownloadFunctionUrl.FunctionUrl  # public link for the email receipt
           DOCS_URL: https://nccs.urban.org                # methodology/column docs link in the receipt (confirm)
+          # ADR 0030: route giants to Fargate. Empty ECS_CLUSTER => async disabled.
+          ASYNC_THRESHOLD_BYTES: "8589934592"             # 8 GB (under Lambda's 10 GB join cap)
+          ECS_CLUSTER: !If [AsyncEnabled, !Ref WorkerCluster, ""]
+          ECS_TASK_DEF: !If [AsyncEnabled, !Sub "sector-in-brief-api-worker-${Stage}", ""]
+          ECS_CONTAINER: worker
+          ECS_SUBNETS: !If [AsyncEnabled, !Join [",", !Ref WorkerSubnets], ""]
+          ECS_SECURITY_GROUP: !If [AsyncEnabled, !Ref WorkerSecurityGroup, ""]
       FunctionUrlConfig:
         AuthType: AWS_IAM             # callers (dashboard server) sign SigV4; testable via direct invoke
         Cors:
@@ -161,6 +187,140 @@ Resources:
                 - arn:aws:s3:::nccsdata/usage/*
                 - !Sub arn:aws:s3:::sector-in-brief-api-results-${Stage}/usage/*
 
+  # ---- ADR 0030: async giant-export worker (Fargate) ----------------------
+  # All gated on AsyncEnabled (WorkerVpcId provided), so a no-param deploy omits
+  # them and the API runs everything synchronously.
+
+  WorkerRepo:                          # ECR repo for the worker image (operator builds/pushes — see deploy.md)
+    Type: AWS::ECR::Repository
+    Condition: AsyncEnabled
+    Properties:
+      RepositoryName: !Sub sector-in-brief-api-worker-${Stage}
+      ImageScanningConfiguration: { ScanOnPush: true }
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"keep last 5 images",
+          "selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},
+          "action":{"type":"expire"}}]}
+
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: AsyncEnabled
+    Properties:
+      LogGroupName: !Sub /ecs/sector-in-brief-api-worker-${Stage}
+      RetentionInDays: 30
+
+  WorkerSecurityGroup:                 # egress-only; the task reaches S3/ECR/SES over the internet
+    Type: AWS::EC2::SecurityGroup
+    Condition: AsyncEnabled
+    Properties:
+      GroupDescription: !Sub sector-in-brief-api worker egress (${Stage})
+      VpcId: !Ref WorkerVpcId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  WorkerCluster:
+    Type: AWS::ECS::Cluster
+    Condition: AsyncEnabled
+    Properties:
+      ClusterName: !Sub sector-in-brief-api-worker-${Stage}
+
+  WorkerExecutionRole:                 # ECS agent: pull image from ECR + write task logs
+    Type: AWS::IAM::Role
+    Condition: AsyncEnabled
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  WorkerTaskRole:                      # the worker app's own perms (same shape as QueryFunction)
+    Type: AWS::IAM::Role
+    Condition: AsyncEnabled
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: worker-data-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadNccsData
+                Effect: Allow
+                Action: [s3:GetObject]
+                Resource: arn:aws:s3:::nccsdata/*
+              - Sid: ListNccsData
+                Effect: Allow
+                Action: [s3:ListBucket]
+                Resource: arn:aws:s3:::nccsdata
+              - Sid: ReadWriteResults
+                Effect: Allow
+                Action: [s3:PutObject, s3:GetObject]
+                Resource: !Sub arn:aws:s3:::sector-in-brief-api-results-${Stage}/*
+              - Sid: SendReceipt
+                Effect: Allow
+                Action: [ses:SendEmail]
+                Resource: "*"
+
+  WorkerTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Condition: AsyncEnabled
+    Properties:
+      Family: !Sub sector-in-brief-api-worker-${Stage}
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !Ref WorkerCpu
+      Memory: !Ref WorkerMemory
+      EphemeralStorage:
+        SizeInGiB: 200                 # DuckDB spill room past the memory limit (max for Fargate)
+      ExecutionRoleArn: !GetAtt WorkerExecutionRole.Arn
+      TaskRoleArn: !GetAtt WorkerTaskRole.Arn
+      ContainerDefinitions:
+        - Name: worker                 # must match ECS_CONTAINER on the Lambda
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/sector-in-brief-api-worker-${Stage}:latest
+          Essential: true
+          Environment:
+            - { Name: RESULTS_BUCKET, Value: !Ref ResultsBucket }
+            - { Name: URL_TTL_SECONDS, Value: "3600" }
+            - { Name: SENDER_EMAIL, Value: tpoongundranar@urban.org }
+            - { Name: DOWNLOAD_BASE_URL, Value: !GetAtt DownloadFunctionUrl.FunctionUrl }
+            - { Name: DOCS_URL, Value: https://nccs.urban.org }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WorkerLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: worker
+
+  QueryAsyncPolicy:                    # let the query Lambda launch the worker task
+    Type: AWS::IAM::Policy
+    Condition: AsyncEnabled
+    Properties:
+      PolicyName: dispatch-fargate
+      Roles: [!Ref QueryFunctionRole]  # SAM-generated role for QueryFunction
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: RunWorkerTask
+            Effect: Allow
+            Action: ecs:RunTask
+            Resource: !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/sector-in-brief-api-worker-${Stage}:*
+          - Sid: PassWorkerRoles
+            Effect: Allow
+            Action: iam:PassRole
+            Resource:
+              - !GetAtt WorkerExecutionRole.Arn
+              - !GetAtt WorkerTaskRole.Arn
+
 Outputs:
   QueryFunctionUrl:
     Description: POST /data endpoint (Function URL, AWS_IAM)
@@ -173,3 +333,7 @@ Outputs:
     Value: !Ref QueryFunction
   ResultsBucket:
     Value: !Ref ResultsBucket
+  WorkerRepoUri:
+    Condition: AsyncEnabled
+    Description: ECR repo for the worker image — docker build/push here before async deploy
+    Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/sector-in-brief-api-worker-${Stage}

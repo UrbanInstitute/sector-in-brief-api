@@ -626,7 +626,7 @@ def _dispatch_async(plan, job_id, email, est_bytes, s3):
             "subnets": ECS_SUBNETS, "securityGroups": [ECS_SECURITY_GROUP],
             "assignPublicIp": "ENABLED"}},   # default-VPC public subnets: need a public IP to reach S3/ECR/SES
         overrides={"containerOverrides": [{"name": ECS_CONTAINER,
-                                           "command": ["python", "-m", "worker", job_id]}]})
+                                           "environment": [{"name": "JOB_ID", "value": job_id}]}]})
     _log_event(s3, "export_dispatched_async", {"job_id": job_id, "estimated_bytes": est_bytes})
     base, data_url, dict_url = _durable_urls(job_id)
     return _resp(202, {

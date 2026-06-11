@@ -87,6 +87,46 @@ secret → redeploy → `delete-access-key` (the old one). This account is separ
 from the institutional `nccsdata` account, so its 24h access-key rotation policy
 (the reason the S3 data sync is anonymous) does not apply here.
 
+## Async giant-export worker (ADR 0030)
+
+Giants over `ASYNC_THRESHOLD_BYTES` (8 GB) run on Fargate, not Lambda. The worker
+resources are **conditional**: deploy without `WorkerVpcId` and the API runs
+everything synchronously (the handler guards on `ECS_CLUSTER`). To enable it:
+
+**1. Find the default VPC + its public subnets:**
+```
+aws ec2 describe-vpcs --filters Name=isDefault,Values=true --query "Vpcs[0].VpcId" --output text --profile thiya --region us-east-1
+aws ec2 describe-subnets --filters Name=default-for-az,Values=true --query "Subnets[].SubnetId" --output text --profile thiya --region us-east-1
+```
+
+**2. Deploy with the worker params** (creates ECR repo, ECS cluster, task def, roles, SG; wires the Lambda):
+```
+sam build
+sam deploy --stack-name sector-in-brief-api-stg --capabilities CAPABILITY_IAM --resolve-s3 --parameter-overrides Stage=stg WorkerVpcId=vpc-XXXX "WorkerSubnets=subnet-A,subnet-B,subnet-C" --no-confirm-changeset --profile thiya --region us-east-1
+```
+
+**3. Build + push the worker image** (the task def references `:latest`; the ECR
+repo now exists). Get `WorkerRepoUri` from the stack outputs:
+```
+REPO=$(aws cloudformation describe-stacks --stack-name sector-in-brief-api-stg --query "Stacks[0].Outputs[?OutputKey=='WorkerRepoUri'].OutputValue" --output text --profile thiya --region us-east-1)
+aws ecr get-login-password --region us-east-1 --profile thiya | docker login --username AWS --password-stdin "${REPO%/*}"
+docker build -t "$REPO:latest" .
+docker push "$REPO:latest"
+```
+Re-run this build/push whenever `query/` or the `Dockerfile` changes (the worker
+image is separate from the Lambda's `sam build`).
+
+**4. Verify async end to end** — a deliberately broad request (no state filter, all
+years/forms, wide columns) should exceed 8 GB and route to Fargate:
+```
+aws lambda invoke --function-name sector-in-brief-api-query-stg --cli-binary-format raw-in-base64-out --cli-read-timeout 900 --payload '{"tax_years":[2015,2016,2017,2018,2019,2020],"forms":["990","990ez","990pf"],"columns":["ein","org_name_display","geo_state_abbr","org_type","nteev2_subsector","total_revenue","total_assets_eoy"]}' /tmp/async.json --profile thiya --region us-east-1 && cat /tmp/async.json
+```
+Expect `statusCode 202` with `"status":"pending"`. Then poll the durable link
+(`download_path`) until it 302s, and watch the worker run:
+```
+aws logs tail /ecs/sector-in-brief-api-worker-stg --since 15m --follow --profile thiya --region us-east-1
+```
+
 ## Not in slice 1 (later slices)
 Durable `/download/{job_id}` + request registry, default-on email receipt,
 NDJSON telemetry + monthly rollup, prod stage, and the soak/cutover (ADR 0008).
