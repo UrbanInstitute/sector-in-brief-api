@@ -314,6 +314,19 @@ def _validate_active_years(req):
     return ys
 
 
+BMF_LIFESPAN_COLS = ("first_year_in_bmf", "last_year_in_bmf")
+
+
+def _with_provenance_cols(cols, active_years):
+    """When an active_years overlap filter is applied, force BOTH lifespan columns
+    into the output so the predicate is self-auditing from the result alone (record
+    evidence, not verdicts). Both are needed: an overlap match can't be verified from
+    one endpoint. Deduped, appended after the caller's columns (ein is already first)."""
+    if not active_years:
+        return cols
+    return cols + [c for c in BMF_LIFESPAN_COLS if c not in cols]
+
+
 def _plan(con, req):
     mode = req.get("source", "core")
     if mode not in ("core", "bmf"):
@@ -330,6 +343,7 @@ def _plan(con, req):
         core_paths, active_years = [], _validate_active_years(req)
     src = _column_sources(con, core_paths)
     years, forms, cols, filters, fmt = _validate(req, src, mode)
+    cols = _with_provenance_cols(cols, active_years)
     filters = _expand_region_filter(filters)   # region -> states, so it pushes down (slice 5.1)
     return dict(mode=mode, years=years, forms=forms, cols=cols, filters=filters, fmt=fmt,
                 src=src, core_paths=core_paths, active_years=active_years)

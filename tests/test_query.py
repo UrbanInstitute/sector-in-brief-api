@@ -6,7 +6,8 @@ import pytest
 from query.query import (_validate, _build_sql, _dictionary_sql, _core_parquets,
                          _sql_list, _double_count_note, _region_case, _expand_region_filter,
                          _org_type_case, _subsector_def_case, SUBSECTOR_DEFINITION,
-                         _validate_active_years, DERIVED_COLUMNS, CENSUS_REGION, BadRequest)
+                         _validate_active_years, _with_provenance_cols,
+                         DERIVED_COLUMNS, CENSUS_REGION, BadRequest)
 
 # fake column->source map (core wins overlaps): ein/total_revenue core; the rest bmf
 SRC = {"ein": "c", "total_revenue": "c",
@@ -160,6 +161,19 @@ def test_bmf_active_years_ands_with_in_filters():
     sql, params = _build_sql(["ein"], {"geo_state_abbr": ["CA"]}, BMF_SRC, [], active_years=[2020])
     assert " AND " in sql
     assert params == ["CA", 2020, 2020]
+
+
+def test_with_provenance_cols_forces_both_lifespan_cols_when_filtering():
+    # active_years applied: both lifespan cols appended (deduped), result self-audits the overlap
+    assert _with_provenance_cols(["ein"], [2020]) == ["ein", "first_year_in_bmf", "last_year_in_bmf"]
+    assert _with_provenance_cols(["ein", "last_year_in_bmf"], [2020]) == \
+        ["ein", "last_year_in_bmf", "first_year_in_bmf"]
+
+
+def test_with_provenance_cols_noop_without_active_years():
+    # no overlap filter (core mode, or BMF with no year filter): columns untouched
+    assert _with_provenance_cols(["ein", "geo_state_abbr"], None) == ["ein", "geo_state_abbr"]
+    assert _with_provenance_cols(["ein"], []) == ["ein"]
 
 
 def test_validate_active_years_rules():
