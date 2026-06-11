@@ -6,11 +6,14 @@ import pytest
 from query.query import (_validate, _build_sql, _dictionary_sql, _core_parquets,
                          _sql_list, _double_count_note, _region_case, _expand_region_filter,
                          _org_type_case, _subsector_def_case, SUBSECTOR_DEFINITION,
+                         _validate_active_years, _with_provenance_cols,
                          DERIVED_COLUMNS, CENSUS_REGION, BadRequest)
 
 # fake column->source map (core wins overlaps): ein/total_revenue core; the rest bmf
 SRC = {"ein": "c", "total_revenue": "c",
        "geo_state_abbr": "b", "org_name_display": "b", "ntee_common_code": "b"}
+# BMF-only mode: every column resolves to the enriched bmf source ('b')
+BMF_SRC = {"ein": "b", "geo_state_abbr": "b", "first_year_in_bmf": "b", "last_year_in_bmf": "b"}
 
 
 def test_validate_ok_and_autoadds_ein():
@@ -132,3 +135,59 @@ def test_subsector_definition_is_derived_and_canonical():
     # UNU has no WHEN -> folds into the 'Other' catch-all (keeps it null-free)
     assert "'UNU'" not in sql
     assert sql.rstrip().endswith("ELSE 'Other' END")
+
+
+# ---- source='bmf' (org-level registry) mode ----------------------------------
+def test_bmf_mode_build_sql_drops_the_core_join():
+    sql, params = _build_sql(["ein", "geo_state_abbr"], {}, BMF_SRC, [])
+    assert 'ON c."ein" = b."ein"' not in sql      # no CORE driving join
+    assert "FROM (" in sql                          # driven by the _bmf_source() subquery
+    assert params == []
+
+
+def test_core_mode_build_sql_keeps_the_core_join():
+    sql, _ = _build_sql(["ein"], {}, SRC, ["s3://x/core_2019_990.parquet"])
+    assert 'ON c."ein" = b."ein"' in sql           # CORE still drives in the default mode
+
+
+def test_bmf_active_years_compiles_to_lifespan_overlap():
+    sql, params = _build_sql(["ein"], {}, BMF_SRC, [], active_years=[2018, 2019, 2022])
+    assert '"first_year_in_bmf" <= ?' in sql and '"last_year_in_bmf" >= ?' in sql
+    assert params == [2022, 2018]                   # overlap with [min,max] of the span, NOT an IN
+    assert 'ON c."ein" = b."ein"' not in sql
+
+
+def test_bmf_active_years_ands_with_in_filters():
+    sql, params = _build_sql(["ein"], {"geo_state_abbr": ["CA"]}, BMF_SRC, [], active_years=[2020])
+    assert " AND " in sql
+    assert params == ["CA", 2020, 2020]
+
+
+def test_with_provenance_cols_forces_both_lifespan_cols_when_filtering():
+    # active_years applied: both lifespan cols appended (deduped), result self-audits the overlap
+    assert _with_provenance_cols(["ein"], [2020]) == ["ein", "first_year_in_bmf", "last_year_in_bmf"]
+    assert _with_provenance_cols(["ein", "last_year_in_bmf"], [2020]) == \
+        ["ein", "last_year_in_bmf", "first_year_in_bmf"]
+
+
+def test_with_provenance_cols_noop_without_active_years():
+    # no overlap filter (core mode, or BMF with no year filter): columns untouched
+    assert _with_provenance_cols(["ein", "geo_state_abbr"], None) == ["ein", "geo_state_abbr"]
+    assert _with_provenance_cols(["ein"], []) == ["ein"]
+
+
+def test_validate_active_years_rules():
+    assert _validate_active_years({}) is None
+    assert _validate_active_years({"active_years": [2019, 2020]}) == [2019, 2020]
+    with pytest.raises(BadRequest):                 # tax_years is a CORE concept; reject in BMF mode
+        _validate_active_years({"tax_years": [2019], "active_years": [2019]})
+    with pytest.raises(BadRequest):
+        _validate_active_years({"active_years": "2019"})
+    with pytest.raises(BadRequest):
+        _validate_active_years({"active_years": [2019.5]})
+
+
+def test_validate_bmf_mode_skips_tax_years_but_keeps_ein():
+    years, forms, cols, filters, fmt = _validate({"columns": ["geo_state_abbr"]}, BMF_SRC, "bmf")
+    assert years == [] and forms == []
+    assert cols[0] == "ein"                         # the key is still force-included
