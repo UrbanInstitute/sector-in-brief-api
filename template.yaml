@@ -30,6 +30,9 @@ Parameters:
   WorkerMemory:
     Type: String
     Default: "61440"         # 60 GB; DuckDB spills past this to the 200 GB ephemeral volume
+  AsyncThresholdBytes:
+    Type: String
+    Default: "8589934592"    # 8 GB — est. result over this routes to the Fargate worker (under Lambda's 10 GB cap). Lower for testing.
 
 Conditions:
   IsProd: !Equals [!Ref Stage, prod]
@@ -74,7 +77,7 @@ Resources:
           DOWNLOAD_BASE_URL: !GetAtt DownloadFunctionUrl.FunctionUrl  # public link for the email receipt
           DOCS_URL: https://nccs.urban.org                # methodology/column docs link in the receipt (confirm)
           # ADR 0030: route giants to Fargate. Empty ECS_CLUSTER => async disabled.
-          ASYNC_THRESHOLD_BYTES: "8589934592"             # 8 GB (under Lambda's 10 GB join cap)
+          ASYNC_THRESHOLD_BYTES: !Ref AsyncThresholdBytes
           ECS_CLUSTER: !If [AsyncEnabled, !Ref WorkerCluster, ""]
           ECS_TASK_DEF: !If [AsyncEnabled, !Sub "sector-in-brief-api-worker-${Stage}", ""]
           ECS_CONTAINER: worker

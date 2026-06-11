@@ -116,16 +116,20 @@ docker push "$REPO:latest"
 Re-run this build/push whenever `query/` or the `Dockerfile` changes (the worker
 image is separate from the Lambda's `sam build`).
 
-**4. Verify async end to end** — a deliberately broad request (no state filter, all
-years/forms, wide columns) should exceed 8 GB and route to Fargate:
+**4. Verify async end to end.** Most real requests are under 8 GB, so to exercise
+the Fargate path on demand, redeploy with a low `AsyncThresholdBytes` (it's a
+deploy parameter), run any broad (no-state-filter) request, then redeploy at the
+default. E.g. force anything over 100 MB to async:
 ```
+sam deploy --stack-name sector-in-brief-api-stg --capabilities CAPABILITY_IAM --resolve-s3 --parameter-overrides Stage=stg WorkerVpcId=$VPC "WorkerSubnets=$SUBNETS" AsyncThresholdBytes=100000000 --no-confirm-changeset --profile thiya --region us-east-1
 aws lambda invoke --function-name sector-in-brief-api-query-stg --cli-binary-format raw-in-base64-out --cli-read-timeout 900 --payload '{"tax_years":[2015,2016,2017,2018,2019,2020],"forms":["990","990ez","990pf"],"columns":["ein","org_name_display","geo_state_abbr","org_type","nteev2_subsector","total_revenue","total_assets_eoy"]}' /tmp/async.json --profile thiya --region us-east-1 && cat /tmp/async.json
 ```
-Expect `statusCode 202` with `"status":"pending"`. Then poll the durable link
-(`download_path`) until it 302s, and watch the worker run:
+Expect `statusCode 202` with `"status":"pending"`. Watch the worker, then poll the
+durable link (`download_path`) until it 302s:
 ```
 aws logs tail /ecs/sector-in-brief-api-worker-stg --since 15m --follow --profile thiya --region us-east-1
 ```
+Redeploy without `AsyncThresholdBytes` to restore the 8 GB default.
 
 ## Not in slice 1 (later slices)
 Durable `/download/{job_id}` + request registry, default-on email receipt,
