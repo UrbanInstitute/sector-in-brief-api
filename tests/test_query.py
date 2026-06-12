@@ -4,7 +4,7 @@ os.environ.setdefault("RESULTS_BUCKET", "test-bucket")  # query.py reads this at
 
 import pytest
 from query.query import (_validate, _build_sql, _dictionary_sql, _core_parquets, _core_dicts,
-                         _sql_list, _double_count_note, _region_case, _expand_region_filter,
+                         _core_key, _sql_list, _double_count_note, _region_case, _expand_region_filter,
                          _org_type_case, _subsector_def_case, SUBSECTOR_DEFINITION,
                          _validate_active_years, _with_provenance_cols,
                          _needs_estimate_for_routing,
@@ -237,7 +237,23 @@ def test_expand_region_empty_state_list_is_ignored_not_intersected():
     assert set(f["geo_state_abbr"]) == set(CENSUS_REGION["West"])
 
 
-# ---- issue #14: tolerate missing (year, form) partitions --------------------
+# ---- issue #14: per-form CORE tier routing (API is canonical) ----------------
+def test_core_key_routes_forms_to_tiers():
+    # 990combined + 990pf -> full-range within-core panel; 990/990ez -> modern tier
+    assert _core_key(1994, "990combined") == \
+        "processed_merged/core/1994/990combined/core_1994_990combined.parquet"
+    assert _core_key(2005, "990pf") == "processed_merged/core/2005/990pf/core_2005_990pf.parquet"
+    assert _core_key(2019, "990") == "processed/core/2019/990/core_2019_990.parquet"
+    assert _core_key(2019, "990ez") == "processed/core/2019/990ez/core_2019_990ez.parquet"
+
+
+def test_core_dicts_route_by_form_tier():
+    dicts = _core_dicts([(1994, "990combined"), (2019, "990")])
+    assert any("processed_merged/core/1994/990combined/core_1994_990combined_dictionary.csv" in d
+               for d in dicts)                        # combined dict from the panel tier
+    assert any("processed/core/2019/990/core_2019_990_dictionary.csv" in d for d in dicts)
+
+
 def test_core_dicts_picks_latest_vintage_per_form():
     dicts = _core_dicts([(2019, "990"), (2021, "990"), (2020, "990ez")])
     assert len(dicts) == 2                            # one representative per form
