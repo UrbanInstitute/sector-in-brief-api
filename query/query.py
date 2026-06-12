@@ -96,6 +96,18 @@ ECS_CONTAINER = os.environ.get("ECS_CONTAINER", "worker")
 ECS_SUBNETS = [s for s in os.environ.get("ECS_SUBNETS", "").split(",") if s]
 ECS_SECURITY_GROUP = os.environ.get("ECS_SECURITY_GROUP", "")
 ALL_FORMS = ["990", "990ez", "990pf", "990combined"]
+# Per-form CORE tier. This API is canonical (the dashboard follows): 990combined
+# and 990pf are served from the full-range within-core panel (core-panel,
+# processed_merged/core/, 1987-2024); 990 and 990ez are separate forms that exist
+# only in the modern tier (core-990, processed/core/, 2012+). 990combined here is
+# therefore the panel's 990+990EZ union on the common variable set. See
+# nccs-contracts ADR 0008/0016 + nccs-data-core core-{990,panel} contracts.
+CORE_PREFIX = {
+    "990combined": "processed_merged/core",
+    "990pf":       "processed_merged/core",
+    "990":         "processed/core",
+    "990ez":       "processed/core",
+}
 EXT = {"csv": "csv", "parquet": "parquet"}
 JOB_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -106,43 +118,49 @@ class BadRequest(Exception):
 
 # ---- path builders -----------------------------------------------------------
 def _core_key(y, f):
-    return f"processed/core/{y}/{f}/core_{y}_{f}.parquet"
+    return f"{CORE_PREFIX[f]}/{y}/{f}/core_{y}_{f}.parquet"
+
+
+def _core_dict_key(y, f):
+    return f"{CORE_PREFIX[f]}/{y}/{f}/core_{y}_{f}_dictionary.csv"
 
 
 def _core_parquets(years, forms):
     return [f"{NCCS}/{_core_key(y, f)}" for y in years for f in forms]
 
 
-def _existing_partitions(years, forms):
-    """(year, form) pairs whose core parquet actually exists in S3. The producer
-    doesn't publish every (year, form) — e.g. pre-2012 990combined — and DuckDB
-    errors on the FIRST missing path in an explicit read_parquet([...]) list, so a
-    single gap would 404 the whole export (issue #14). HEAD each candidate, skip
-    the gaps, and log what was dropped (no silent truncation)."""
+def _resolve_core_partitions(years, forms):
+    """The (year, form) pairs to read, each confirmed present in its form's tier
+    (CORE_PREFIX). Not every (year, form) exists — 990/990ez are modern-only
+    (2012+), 990combined/990pf span 1987-2024 via the panel — so HEAD each key and
+    FAIL LOUDLY listing any gaps. Never silently skip a missing partition: that
+    would drop data from the export with no error (issue #14)."""
     s3 = boto3.client("s3")
     have, missing = [], []
-    for y in years:
-        for f in forms:
+    for f in forms:
+        for y in years:
             try:
                 s3.head_object(Bucket=NCCS_BUCKET, Key=_core_key(y, f))
                 have.append((y, f))
             except ClientError as e:
                 if e.response.get("Error", {}).get("Code") not in ("404", "NoSuchKey"):
                     raise            # a real access error is not a missing partition
-                missing.append(f"{y}/{f}")
+                missing.append((y, f))
     if missing:
-        print(json.dumps({"event": "core_partitions_skipped", "missing": missing}))
+        raise BadRequest("no published core data for: "
+                         + ", ".join(f"{f} {y}" for y, f in missing)
+                         + " (990/990ez are 2012+; 990combined/990pf cover 1987-2024)")
     return have
 
 
 def _core_dicts(pairs):
     """One representative dictionary CSV per form — descriptions are stable across
-    years, so use the latest existing vintage for each form."""
+    years, so use the latest vintage for each form (routed to that form's tier)."""
     latest = {}
     for y, f in pairs:
         if y > latest.get(f, -1):
             latest[f] = y
-    return [f"{NCCS}/processed/core/{y}/{f}/core_{y}_{f}_dictionary.csv" for f, y in latest.items()]
+    return [f"{NCCS}/{_core_dict_key(y, f)}" for f, y in latest.items()]
 
 
 def _sql_list(paths):
@@ -413,10 +431,7 @@ def _plan(con, req):
             raise BadRequest("tax_years must be a non-empty list of years")
         if not all(f in ALL_FORMS for f in forms):
             raise BadRequest(f"forms must be a subset of {ALL_FORMS}")
-        core_pairs = _existing_partitions(years, forms)   # drop unpublished (year, form) gaps
-        if not core_pairs:
-            raise BadRequest(
-                f"no published core partitions for tax_years {sorted(years)} x forms {forms}")
+        core_pairs = _resolve_core_partitions(years, forms)   # raises on any missing (year, form)
         core_paths = [f"{NCCS}/{_core_key(y, f)}" for y, f in core_pairs]
         active_years = None
     else:                              # source='bmf': org-level registry, no core join
