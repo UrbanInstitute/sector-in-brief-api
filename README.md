@@ -8,8 +8,8 @@ result to a dedicated results bucket, and hands back a durable download link
 Replaces the archived **`nccs-dataexplorer-api`** (which used AWS Athena). The
 architecture is decided and canonical in **`nccs-contracts`** — ADR 0008
 (modernize the API: DuckDB, not Athena), ADR 0026 (durable links + email receipt
-+ telemetry), ADR 0016 (join the contracts at query time), and ADR 0030 (async
-giant-export worker).
++ telemetry), ADR 0016 (join the contracts at query time), ADR 0029 (BMF
+org-level query mode), and ADR 0030 (async giant-export worker).
 
 ## How it works
 
@@ -24,6 +24,22 @@ giant-export worker).
 4. An SES email with a **durable `/download/{job_id}` link** is sent to the
    requester. Every request / materialize / download is logged as NDJSON for the
    monthly usage rollup.
+
+### Query modes
+
+`POST /data` runs in one of two modes, chosen by the `source` field:
+
+- **`source: "core"`** (default) — the **per-filing** export. Joins the
+  requested CORE form tiers (`tax_years` × `forms`) to **BMF-geocoded** on `EIN`,
+  so each row is an organization's filing for a tax year.
+- **`source: "bmf"`** (ADR 0029) — an **org-level** export straight from the
+  **BMF master registry** (one row per organization; no `tax_years`/`forms`).
+  Use `active_years` to keep only orgs whose lifespan overlaps the given years.
+
+Either way the result is enriched from the **BMF-geocoded** archive with
+crosswalk-derived geography (county / CBSA / Census region) and the
+dashboard-canonical `org_type` and `nteev2_subsector` labels, mirroring
+`sector-in-brief-data`.
 
 ### Request shape
 
@@ -42,8 +58,7 @@ giant-export worker).
 - `format` — `"csv"` (default) or `"parquet"`.
 - `"estimate": true` — return an exact row count + sampled byte estimate only
   (no S3 write, no email), for a size pre-check.
-- **BMF org-level mode:** `"source": "bmf"` queries the org-level BMF registry
-  (no `tax_years`/`forms`); use `active_years` to filter by org lifespan overlap.
+- `source` / `active_years` — select the BMF org-level mode (see **Query modes**).
 
 ### Response shapes
 
@@ -91,4 +106,4 @@ fast synchronous path. Deploying with an empty `WorkerVpcId` disables the worker
 
 - GitHub: <https://github.com/UrbanInstitute/sector-in-brief-api> (public; org
   canonical name is `UI-Research`).
-- Architecture of record: `nccs-contracts` — ADR 0008 / 0016 / 0026 / 0030.
+- Architecture of record: `nccs-contracts` — ADR 0008 / 0016 / 0026 / 0029 / 0030.
