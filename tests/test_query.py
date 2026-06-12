@@ -3,7 +3,7 @@ import os
 os.environ.setdefault("RESULTS_BUCKET", "test-bucket")  # query.py reads this at import
 
 import pytest
-from query.query import (_validate, _build_sql, _dictionary_sql, _core_parquets,
+from query.query import (_validate, _build_sql, _dictionary_sql, _core_parquets, _core_dicts,
                          _sql_list, _double_count_note, _region_case, _expand_region_filter,
                          _org_type_case, _subsector_def_case, SUBSECTOR_DEFINITION,
                          _validate_active_years, _with_provenance_cols,
@@ -201,3 +201,45 @@ def test_validate_bmf_mode_skips_tax_years_but_keeps_ein():
     years, forms, cols, filters, fmt = _validate({"columns": ["geo_state_abbr"]}, BMF_SRC, "bmf")
     assert years == [] and forms == []
     assert cols[0] == "ein"                         # the key is still force-included
+
+
+# ---- issue #13: never emit `col IN ()` --------------------------------------
+def test_build_sql_single_value_filter_binds_one_param():
+    sql, params = _build_sql(["ein"], {"geo_state_abbr": ["AZ"]}, SRC, ["s3://b/x.parquet"])
+    assert 'b."geo_state_abbr" IN (?)' in sql        # one value -> one placeholder, not IN ()
+    assert params == ["AZ"]
+
+
+def test_build_sql_empty_filter_emits_no_predicate():
+    sql, params = _build_sql(["ein"], {"geo_state_abbr": []}, SRC, ["s3://b/x.parquet"])
+    assert "IN ()" not in sql                         # invalid SQL must never be generated
+    assert 'b."geo_state_abbr" IN' not in sql         # empty selection -> no filter predicate
+    assert "WHERE" not in sql and params == []        # (unquoted geo_state_abbr in the bmf CASE is fine)
+
+
+def test_expand_region_empty_intersection_raises():
+    with pytest.raises(BadRequest):                   # West + AZ-only... AZ is West, so use a real miss:
+        _expand_region_filter({"census_region": ["Northeast"], "geo_state_abbr": ["CA"]})
+
+
+def test_expand_region_empty_state_list_is_ignored_not_intersected():
+    # an empty geo_state_abbr is "no state filter", so the region's states pass through
+    f = _expand_region_filter({"census_region": ["West"], "geo_state_abbr": []})
+    assert set(f["geo_state_abbr"]) == set(CENSUS_REGION["West"])
+
+
+# ---- issue #14: tolerate missing (year, form) partitions --------------------
+def test_core_dicts_picks_latest_vintage_per_form():
+    dicts = _core_dicts([(2019, "990"), (2021, "990"), (2020, "990ez")])
+    assert len(dicts) == 2                            # one representative per form
+    assert any("2021/990/core_2021_990_dictionary.csv" in d for d in dicts)   # latest 990
+    assert any("2020/990ez/core_2020_990ez_dictionary.csv" in d for d in dicts)
+
+
+# ---- issue #15: derived-column null_pct -------------------------------------
+def test_dictionary_sql_null_pct_for_derived_columns():
+    sql, _ = _dictionary_sql(["org_type", "cbsa_title"],
+                             {"org_type": "b", "cbsa_title": "b"}, ["s3://d.csv"])
+    assert "('org_type', 'crosswalk'" in sql and "0.0)" in sql       # null-free -> 0
+    assert "null rate not precomputed" in sql                        # nullable -> flagged
+    assert "CAST(NULL AS DOUBLE)" in sql                             # ...and left NULL
