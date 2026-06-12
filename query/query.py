@@ -276,6 +276,15 @@ def _validate(req, src, mode="core"):
     unknown = [c for c in cols if c not in src] + [k for k in filters if k not in src]
     if unknown:
         raise BadRequest(f"unknown column(s): {sorted(set(unknown))}")
+    # An explicitly empty filter list is malformed: "no filter on this column" is
+    # expressed by OMITTING the key (which match-alls), so an empty list only
+    # happens when a caller's selection broke. Reject it loudly rather than
+    # silently exporting the whole dataset (issue #13). Mandatory-vs-optional is a
+    # consumer (dashboard) concern; the API just refuses any value-less filter.
+    empty = [k for k, v in filters.items() if isinstance(v, list) and not v]
+    if empty:
+        raise BadRequest(
+            f"filter(s) with no values: {sorted(empty)}; omit the key to leave a column unfiltered")
     return years, forms, cols, filters, fmt
 
 
@@ -284,8 +293,8 @@ def _build_sql(cols, filters, src, core_paths, active_years=None):
     clauses, params = [], []
     for k, vals in (filters or {}).items():
         vals = vals if isinstance(vals, list) else [vals]
-        if not vals:                 # empty selection => no constraint on this column.
-            continue                 # never emit `IN ()` (invalid SQL — issue #13).
+        if not vals:                 # _validate rejects empty filter lists up front;
+            continue                 # this is last-resort defense so we never emit `IN ()`.
         clauses.append(f'{src[k]}."{k}" IN ({", ".join(["?"] * len(vals))})')
         params += [str(v) for v in vals]
     if active_years:   # BMF year filter: org lifespan [first,last] OVERLAPS [min,max] of the span (see _plan)

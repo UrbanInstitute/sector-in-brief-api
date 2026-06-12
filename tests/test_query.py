@@ -210,7 +210,16 @@ def test_build_sql_single_value_filter_binds_one_param():
     assert params == ["AZ"]
 
 
+def test_validate_rejects_empty_filter_list():
+    # an empty filter list is malformed: "unfiltered" is expressed by omitting the
+    # key. Reject at validation rather than silently exporting everything (issue #13).
+    with pytest.raises(BadRequest):
+        _validate({"tax_years": [2019], "columns": ["ein"], "filters": {"geo_state_abbr": []}}, SRC)
+
+
 def test_build_sql_empty_filter_emits_no_predicate():
+    # _validate rejects empty lists up front; this asserts the last-resort guard in
+    # _build_sql still never emits invalid `IN ()` if one slips through another path.
     sql, params = _build_sql(["ein"], {"geo_state_abbr": []}, SRC, ["s3://b/x.parquet"])
     assert "IN ()" not in sql                         # invalid SQL must never be generated
     assert 'b."geo_state_abbr" IN' not in sql         # empty selection -> no filter predicate
