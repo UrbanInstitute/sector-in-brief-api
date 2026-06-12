@@ -18,9 +18,11 @@ SQL (filter values are bound params); job_id is shape-checked before it touches 
 S3 key. Interface: ../openapi.yaml.
 """
 import os, re, json, time, base64, uuid, hashlib, boto3, duckdb
+from botocore.exceptions import ClientError
 from datetime import datetime, timezone
 
 NCCS = "s3://nccsdata"
+NCCS_BUCKET = "nccsdata"
 BMF = f"{NCCS}/geocoding/bmf-master/merged/bmf_master_geocoded.parquet"
 BMF_DICT = f"{NCCS}/geocoding/bmf-master/merged/bmf_master_geocoded_data_dictionary.csv"
 
@@ -103,13 +105,44 @@ class BadRequest(Exception):
 
 
 # ---- path builders -----------------------------------------------------------
+def _core_key(y, f):
+    return f"processed/core/{y}/{f}/core_{y}_{f}.parquet"
+
+
 def _core_parquets(years, forms):
-    return [f"{NCCS}/processed/core/{y}/{f}/core_{y}_{f}.parquet" for y in years for f in forms]
+    return [f"{NCCS}/{_core_key(y, f)}" for y in years for f in forms]
 
 
-def _core_dicts(years, forms):
-    y = max(years)  # descriptions are stable across years; one representative vintage
-    return [f"{NCCS}/processed/core/{y}/{f}/core_{y}_{f}_dictionary.csv" for f in forms]
+def _existing_partitions(years, forms):
+    """(year, form) pairs whose core parquet actually exists in S3. The producer
+    doesn't publish every (year, form) — e.g. pre-2012 990combined — and DuckDB
+    errors on the FIRST missing path in an explicit read_parquet([...]) list, so a
+    single gap would 404 the whole export (issue #14). HEAD each candidate, skip
+    the gaps, and log what was dropped (no silent truncation)."""
+    s3 = boto3.client("s3")
+    have, missing = [], []
+    for y in years:
+        for f in forms:
+            try:
+                s3.head_object(Bucket=NCCS_BUCKET, Key=_core_key(y, f))
+                have.append((y, f))
+            except ClientError as e:
+                if e.response.get("Error", {}).get("Code") not in ("404", "NoSuchKey"):
+                    raise            # a real access error is not a missing partition
+                missing.append(f"{y}/{f}")
+    if missing:
+        print(json.dumps({"event": "core_partitions_skipped", "missing": missing}))
+    return have
+
+
+def _core_dicts(pairs):
+    """One representative dictionary CSV per form — descriptions are stable across
+    years, so use the latest existing vintage for each form."""
+    latest = {}
+    for y, f in pairs:
+        if y > latest.get(f, -1):
+            latest[f] = y
+    return [f"{NCCS}/processed/core/{y}/{f}/core_{y}_{f}_dictionary.csv" for f, y in latest.items()]
 
 
 def _sql_list(paths):
@@ -251,6 +284,8 @@ def _build_sql(cols, filters, src, core_paths, active_years=None):
     clauses, params = [], []
     for k, vals in (filters or {}).items():
         vals = vals if isinstance(vals, list) else [vals]
+        if not vals:                 # empty selection => no constraint on this column.
+            continue                 # never emit `IN ()` (invalid SQL — issue #13).
         clauses.append(f'{src[k]}."{k}" IN ({", ".join(["?"] * len(vals))})')
         params += [str(v) for v in vals]
     if active_years:   # BMF year filter: org lifespan [first,last] OVERLAPS [min,max] of the span (see _plan)
@@ -285,12 +320,23 @@ def _dictionary_sql(cols, src, core_dicts):
             f"FROM read_csv('{BMF_DICT}') WHERE column_name IN ({', '.join(['?'] * len(bmf_cols))})")
         params += bmf_cols
     if derived:   # crosswalk-derived geo columns -> static entries (not in core/bmf dicts)
-        vals = ", ".join(
-            "('{c}', 'crosswalk', '{d}', '{t}')".format(
-                c=c, d=DERIVED_COLUMNS[c][0].replace("'", "''"), t=DERIVED_COLUMNS[c][1])
-            for c in derived)
-        parts.append('SELECT "column", source, description, data_type, CAST(NULL AS DOUBLE) AS null_pct '
-                     f'FROM (VALUES {vals}) AS t("column", source, description, data_type)')
+        # These are computed at query time, so there's no precomputed source null_pct.
+        # NULL_FREE columns are null-free by construction (their CASE has an ELSE
+        # catch-all) -> stated as 0. The rest (county/CBSA/region join outputs) DO
+        # carry meaningful nulls; leave null_pct NULL but flag it in the description
+        # so a blank reads as "not computed", not "0%" (issue #15).
+        NULL_FREE = {"org_type", "nteev2_subsector_definition"}
+        rows = []
+        for c in derived:
+            desc = DERIVED_COLUMNS[c][0]
+            null_pct = "0.0" if c in NULL_FREE else "CAST(NULL AS DOUBLE)"
+            if c not in NULL_FREE:
+                desc += " (crosswalk-derived; null rate not precomputed)"
+            rows.append("('{c}', 'crosswalk', '{d}', '{t}', {n})".format(
+                c=c, d=desc.replace("'", "''"), t=DERIVED_COLUMNS[c][1], n=null_pct))
+        vals = ", ".join(rows)
+        parts.append('SELECT "column", source, description, data_type, null_pct '
+                     f'FROM (VALUES {vals}) AS t("column", source, description, data_type, null_pct)')
     return " UNION ALL ".join(parts), params
 
 
@@ -307,8 +353,12 @@ def _expand_region_filter(filters):
         raise BadRequest(f"unknown census_region(s): {unknown}; valid: {list(CENSUS_REGION)}")
     states = set().union(*(CENSUS_REGION[r] for r in filters["census_region"]))
     out = {k: v for k, v in filters.items() if k != "census_region"}
-    if "geo_state_abbr" in out:
+    if "geo_state_abbr" in out and out["geo_state_abbr"]:
         states &= set(out["geo_state_abbr"])
+        if not states:   # contradictory region+state filters: return a clear 400, not
+            raise BadRequest(  # a silent match-all (empty geo_state_abbr -> dropped predicate).
+                "census_region and geo_state_abbr filters don't overlap "
+                f"({sorted(filters['census_region'])} vs {sorted(out['geo_state_abbr'])})")
     out["geo_state_abbr"] = sorted(states)
     return out
 
@@ -354,15 +404,20 @@ def _plan(con, req):
             raise BadRequest("tax_years must be a non-empty list of years")
         if not all(f in ALL_FORMS for f in forms):
             raise BadRequest(f"forms must be a subset of {ALL_FORMS}")
-        core_paths, active_years = _core_parquets(years, forms), None
+        core_pairs = _existing_partitions(years, forms)   # drop unpublished (year, form) gaps
+        if not core_pairs:
+            raise BadRequest(
+                f"no published core partitions for tax_years {sorted(years)} x forms {forms}")
+        core_paths = [f"{NCCS}/{_core_key(y, f)}" for y, f in core_pairs]
+        active_years = None
     else:                              # source='bmf': org-level registry, no core join
-        core_paths, active_years = [], _validate_active_years(req)
+        core_pairs, core_paths, active_years = [], [], _validate_active_years(req)
     src = _column_sources(con, core_paths)
     years, forms, cols, filters, fmt = _validate(req, src, mode)
     cols = _with_provenance_cols(cols, active_years)
     filters = _expand_region_filter(filters)   # region -> states, so it pushes down (slice 5.1)
     return dict(mode=mode, years=years, forms=forms, cols=cols, filters=filters, fmt=fmt,
-                src=src, core_paths=core_paths, active_years=active_years)
+                src=src, core_paths=core_paths, core_pairs=core_pairs, active_years=active_years)
 
 
 def _materialize(con, plan, job_id, s3):
@@ -379,7 +434,7 @@ def _materialize(con, plan, job_id, s3):
         f"COPY ({sql}) TO 's3://{RESULTS_BUCKET}/{result_key}' {copy_opts};", params).fetchone()[0]
     timings["result_copy_ms"] = int((time.monotonic() - t) * 1000)
     t = time.monotonic()
-    core_dicts = _core_dicts(plan["years"], plan["forms"]) if plan["core_paths"] else []
+    core_dicts = _core_dicts(plan["core_pairs"]) if plan["core_pairs"] else []
     dsql, dparams = _dictionary_sql(plan["cols"], plan["src"], core_dicts)
     dict_key = f"results/{job_id}_dictionary.csv"
     con.execute(f"COPY ({dsql}) TO 's3://{RESULTS_BUCKET}/{dict_key}' (FORMAT csv, HEADER);", dparams)
