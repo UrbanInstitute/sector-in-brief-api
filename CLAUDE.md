@@ -78,3 +78,5 @@ back into `nccs-contracts` (see its `CONTRIBUTING.md`).
 
 - Conventional Commits for messages. Don't commit `.claude/settings.local.json`,
   secrets, or notebooks with embedded credentials (see `.gitignore`).
+- AWS access: use `--profile thiya` for all AWS CLI calls. Keep the session
+  read-only / data-plane; hand off heavy or control-plane actions to the user.
