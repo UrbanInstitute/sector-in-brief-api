@@ -21,7 +21,7 @@ superset and only add what's missing. (Supersedes the Phase-0-era
 ## Read first
 `../sector-in-brief-api/`: `openapi.yaml`, `phase0/FINDINGS.md`, `template.yaml`,
 `query/query.py`. This repo: `decisions/0008`, `0026`, `0016`, `0021`, `0023`,
-`contracts/usage-api.yml`, `bmf-master-geocoded.yml`, `county-fips-crosswalk.yml`,
+`contracts/usage-api.yml`, `unified-bmf-geocoded.yml`, `county-fips-crosswalk.yml`,
 `cbsa-crosswalk.yml`, `ct-planning-region-crosswalk.yml`, `core-990.yml`,
 `CONTRIBUTING.md`.
 
@@ -63,7 +63,7 @@ superset and only add what's missing. (Supersedes the Phase-0-era
    `read_bmf.R`/`county_crosswalk.R`/`derive_dimensions.R` exactly (county label
    join with ambiguous→NULL, CT by `%.2f` coordinate, CBSA on coalesced FIPS,
    census region from state). **Add `UrbanInstitute/sector-in-brief-api` as a
-   consumer** of `bmf-master-geocoded`, `county-fips-crosswalk`, `cbsa-crosswalk`,
+   consumer** of `unified-bmf-geocoded`, `county-fips-crosswalk`, `cbsa-crosswalk`,
    and `ct-planning-region-crosswalk`.
 
 5. **`usage-api.yml` — confirm the decided shape** (schema columns still TODO until

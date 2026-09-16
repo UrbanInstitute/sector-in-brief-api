@@ -3,7 +3,7 @@ sector-in-brief-api — /data export + durable /download handler (slices 1-2,
 ADR 0008 / 0026).
 
 POST /data: validate the request against the live parquet schema, join the
-requested CORE form tiers to bmf-master-geocoded on EIN (ADR 0016), materialize
+requested CORE form tiers to unified-bmf-geocoded on EIN (ADR 0016), materialize
 the result + a merged data dictionary to the results bucket (pattern B), write a
 request-registry sidecar, and return presigned URLs.
 
@@ -23,8 +23,8 @@ from datetime import datetime, timezone
 
 NCCS = "s3://nccsdata"
 NCCS_BUCKET = "nccsdata"
-BMF = f"{NCCS}/geocoding/bmf-master/merged/bmf_master_geocoded.parquet"
-BMF_DICT = f"{NCCS}/geocoding/bmf-master/merged/bmf_master_geocoded_data_dictionary.csv"
+BMF = f"{NCCS}/geocoding/unified-bmf/latest/bmf_unified_geocoded.parquet"
+BMF_DICT = f"{NCCS}/geocoding/unified-bmf/latest/bmf_unified_geocoded_data_dictionary.csv"
 
 # Consumer-composed geographic crosswalk joins (ADR 0021/0023), mirroring
 # sector-in-brief-data/R/{county_crosswalk,read_bmf,derive_dimensions}.R so the
@@ -218,7 +218,7 @@ def _subsector_def_case():
 
 
 def _bmf_source():
-    """bmf-master-geocoded enriched with the crosswalk-derived geo columns. Aliased `b`.
+    """unified-bmf-geocoded enriched with the crosswalk-derived geo columns. Aliased `b`.
     Mirrors sector-in-brief-data/R/read_bmf.R: county-label join (ambiguous->NULL),
     CT override by %.2f coordinate, CBSA on the coalesced FIPS, region from state.
     REPLACE overrides bmf's raw nteev2_subsector_definition with the dashboard-
