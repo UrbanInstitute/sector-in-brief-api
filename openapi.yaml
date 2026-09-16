@@ -4,7 +4,7 @@ info:
   version: 0.1.0
   description: >
     Modernized NCCS data-download API (ADR 0008 / 0026). DuckDB-on-parquet:
-    joins the contracted CORE tiers + bmf-master-geocoded on EIN at query time
+    joins the contracted CORE tiers + unified-bmf-geocoded on EIN at query time
     (ADR 0016, no pre-merged table), materializes the result to S3, and returns
     presigned URLs (pattern B — bytes never flow through the API process).
 
@@ -23,9 +23,9 @@ info:
     (ADR 0026 §6).
 
     Two query modes via `source`: `core` (default) joins CORE tax-year
-    partitions to bmf-master-geocoded on EIN and is filtered by `tax_years`;
+    partitions to unified-bmf-geocoded on EIN and is filtered by `tax_years`;
     `bmf` drops the join and selects one row per EIN straight from
-    bmf-master-geocoded (the org registry, incl. non-filers; no financials /
+    unified-bmf-geocoded (the org registry, incl. non-filers; no financials /
     tax-year) and is filtered by `active_years` (org-lifespan overlap). See
     ADR 0029.
 
@@ -44,7 +44,7 @@ paths:
         (column names are whitelisted — the SQL-injection guard, since
         identifiers can't be parameterized; filter values are bound parameters),
         runs the DuckDB join across the requested core tax-year partitions joined
-        to bmf-master-geocoded on EIN, writes the result to the results bucket,
+        to unified-bmf-geocoded on EIN, writes the result to the results bucket,
         and assembles a merged data dictionary (from the per-dataset
         dictionaries, filtered to the delivered columns). Synchronous: returns
         when materialization completes (Function URL allows up to 900s).
@@ -110,9 +110,9 @@ components:
           default: core
           description: >
             Query mode (ADR 0029). `core` (default): join the CORE tax-year
-            partitions to bmf-master-geocoded on EIN; filtered by `tax_years`.
+            partitions to unified-bmf-geocoded on EIN; filtered by `tax_years`.
             `bmf`: org-level registry only (one row per EIN from
-            bmf-master-geocoded, incl. non-filers; no financials / tax-year);
+            unified-bmf-geocoded, incl. non-filers; no financials / tax-year);
             filtered by `active_years`. `tax_years`/`forms` apply only to
             `core`; `active_years` applies only to `bmf`.
         tax_years:
@@ -161,7 +161,7 @@ components:
           minItems: 1
           items: { type: string }
           description: >
-            Output columns by new parquet name. Sources: core, bmf-master-geocoded,
+            Output columns by new parquet name. Sources: core, unified-bmf-geocoded,
             and API-derived columns it composes (mirroring sector-in-brief-data):
             crosswalk geography (ADR 0021/0023) — `geo_county_fips` (canonical
             5-char county GEOID — filter by THIS, not name), `geo_county_canonical`,
