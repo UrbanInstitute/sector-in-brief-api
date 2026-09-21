@@ -1,15 +1,26 @@
 name: contracts-guard
 
-# Thin caller of the reusable contract-change guard in nccs-contracts (ADR 0022).
-# The guard logic lives once there; this file passes only this repo's
-# paths_regex: the code that defines WHAT this API reads from s3://nccsdata
-# (the query and rollup code) and WHERE it writes (the usage/api/ product),
-# plus the deployment and API definitions that pin those locations.
+# What this check does
 #
-# The guard verifies ACKNOWLEDGMENT, not correctness: a PR that touches the
-# matched paths must carry an `ADR NNNN` breadcrumb (commit message or PR body)
-# or the `contracts-ack` label, so the nccs-contracts reconcile isn't silently
-# skipped. See nccs-contracts/CONTRIBUTING.md. Added under backlog Z22 (b).
+# This API reads data from the shared NCCS bucket (the CORE tiers and the
+# geocoded BMF) and writes one product back to it (usage/api/). Where those
+# files live, and what they look like, is agreed in the nccs-contracts
+# repository. If a pull request here changes the code that decides which
+# files are read or written, the people maintaining the contracts need to
+# know, or the two sides drift apart without anyone noticing.
+#
+# So on every pull request this check looks at which files changed. If any
+# of the files listed under paths_regex below changed, the pull request must
+# either name the decision record behind the change ("ADR 0026", for
+# example, in a commit message or in the pull request text) or carry the
+# label "contracts-ack", which means "I checked; no agreed data location
+# changes". If neither is present, the check fails. It never judges whether
+# the change is correct; it only makes sure the change was acknowledged.
+#
+# The check itself lives once, in nccs-contracts, and is shared by every
+# NCCS repository. This file only says which of this repository's files
+# count as the data-reading and data-writing code. Decided in ADR 0022;
+# added here under backlog item Z22.
 
 on:
   pull_request:
