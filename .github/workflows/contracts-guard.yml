@@ -1,0 +1,25 @@
+name: contracts-guard
+
+# Thin caller of the reusable contract-change guard in nccs-contracts (ADR 0022).
+# The guard logic lives once there; this file passes only this repo's
+# paths_regex: the code that defines WHAT this API reads from s3://nccsdata
+# (the query and rollup code) and WHERE it writes (the usage/api/ product),
+# plus the deployment and API definitions that pin those locations.
+#
+# The guard verifies ACKNOWLEDGMENT, not correctness: a PR that touches the
+# matched paths must carry an `ADR NNNN` breadcrumb (commit message or PR body)
+# or the `contracts-ack` label, so the nccs-contracts reconcile isn't silently
+# skipped. See nccs-contracts/CONTRIBUTING.md. Added under backlog Z22 (b).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  contracts-guard:
+    uses: UrbanInstitute/nccs-contracts/.github/workflows/contracts-guard.yml@main
+    with:
+      paths_regex: '^(query/.*\.py|jobs/.*\.py|template\.yaml|openapi\.yaml|samconfig\.toml)$'
