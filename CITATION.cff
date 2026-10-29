@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Sector in Brief download API"
+type: software
+authors:
+  - family-names: Poongundranar
+    given-names: Thiyaghessan
+    affiliation: "National Center for Charitable Statistics, Urban Institute"
+  - name: "Urban Institute"
+repository-code: "https://github.com/UrbanInstitute/sector-in-brief-api"
+url: "https://nccs.urban.org"
+abstract: "Serverless download API for NCCS data, serving filtered extracts of the BMF, CORE and e-file surfaces."
+date-released: "2026-10-29"
