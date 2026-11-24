@@ -1,5 +1,7 @@
 # sector-in-brief-api
 
+Maintained by Thiyaghessan Poongundranar, National Center for Charitable Statistics, Urban Institute, since June 2026.
+
 AWS SAM serverless API that exports NCCS nonprofit data on demand: it runs
 **DuckDB on Parquet** over the contracted NCCS archives in S3, materializes the
 result to a dedicated results bucket, and hands back a durable download link
